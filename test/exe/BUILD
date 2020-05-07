@@ -17,6 +17,8 @@ envoy_sh_test(
         "//bazel:raw_build_id.ldscript",
         "//source/exe:envoy-static",
     ],
+    # The sh_test helper from Bazel does not work as expected, see: https://github.com/bazelbuild/bazel/issues/10959
+    tags = ["fails_on_windows"],
 )
 
 envoy_sh_test(
@@ -24,8 +26,26 @@ envoy_sh_test(
     srcs = ["envoy_static_test.sh"],
     coverage = False,
     data = ["//source/exe:envoy-static"],
+    # For windows, we expect to use a .ps1 script that leverages dumpbin.exe, see:
+    #   https://github.com/envoyproxy/envoy/pull/8280#pullrequestreview-290187328
+    # The sh_test helper from Bazel does not work as expected, see: https://github.com/bazelbuild/bazel/issues/10959
     # Sanitizers doesn't like statically linked lib(std)c++ and libgcc, skip this test in that context.
-    tags = ["no_san"],
+    tags = [
+        "fails_on_windows",
+        "no_san",
+    ],
+)
+
+envoy_sh_test(
+    name = "pie_test",
+    srcs = ["pie_test.sh"],
+    coverage = False,
+    data = ["//source/exe:envoy-static"],
+    # Since VS2015 or even earlier, link.exe defaults to PIE generation
+    tags = [
+        "nofips",
+        "skip_on_windows",
+    ],
 )
 
 envoy_sh_test(
@@ -37,6 +57,8 @@ envoy_sh_test(
         "//bazel:raw_build_id.ldscript",
         "//source/exe:envoy-static",
     ],
+    # The sh_test helper from Bazel does not work as expected, see: https://github.com/bazelbuild/bazel/issues/10959
+    tags = ["fails_on_windows"],
 )
 
 envoy_cc_test(

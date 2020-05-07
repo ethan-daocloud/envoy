@@ -76,6 +76,7 @@ envoy_extension_cc_test(
     external_deps = [
         "grpc_alts_fake_handshaker_server",
     ],
+    tags = ["fails_on_windows"],
     deps = [
         "//source/common/common:utility_lib",
         "//source/common/event:dispatcher_includes",
@@ -87,6 +88,6 @@ envoy_extension_cc_test(
         "//test/mocks/runtime:runtime_mocks",
         "//test/mocks/secret:secret_mocks",
         "//test/test_common:utility_lib",
-        "@envoy_api//envoy/config/transport_socket/alts/v2alpha:alts_cc",
+        "@envoy_api//envoy/config/transport_socket/alts/v2alpha:pkg_cc_proto",
     ],
 )

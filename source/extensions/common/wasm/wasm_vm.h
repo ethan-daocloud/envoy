@@ -3,6 +3,7 @@
 #include <memory>
 
 #include "envoy/common/exception.h"
+#include "envoy/stats/scope.h"
 
 #include "common/common/logger.h"
 
@@ -23,9 +24,15 @@ struct Word {
   uint64_t u64_;
 };
 
+inline std::ostream& operator<<(std::ostream& os, const Word& w) { return os << w.u64_; }
+
 // Convert Word type for use by 32-bit VMs.
-template <typename T> struct ConvertWordTypeToUint32 { using type = T; };
-template <> struct ConvertWordTypeToUint32<Word> { using type = uint32_t; };
+template <typename T> struct ConvertWordTypeToUint32 {
+  using type = T; // NOLINT(readability-identifier-naming)
+};
+template <> struct ConvertWordTypeToUint32<Word> {
+  using type = uint32_t; // NOLINT(readability-identifier-naming)
+};
 
 // Convert Word-based function types for 32-bit VMs.
 template <typename F> struct ConvertFunctionTypeWordToUint32 {};
@@ -34,12 +41,29 @@ template <typename R, typename... Args> struct ConvertFunctionTypeWordToUint32<R
       typename ConvertWordTypeToUint32<Args>::type...);
 };
 
-// A wrapper for a global variable within the VM.
-template <typename T> struct Global {
-  virtual ~Global() = default;
-  virtual T get() PURE;
-  virtual void set(const T& t) PURE;
+template <typename T> inline auto convertWordToUint32(T t) { return t; }
+template <> inline auto convertWordToUint32<Word>(Word t) { return static_cast<uint32_t>(t.u64_); }
+
+// Convert a function of the form Word(Word...) to one of the form uint32_t(uint32_t...).
+template <typename F, F* fn> struct ConvertFunctionWordToUint32 {
+  static void convertFunctionWordToUint32() {}
 };
+template <typename R, typename... Args, auto (*F)(Args...)->R>
+struct ConvertFunctionWordToUint32<R(Args...), F> {
+  static typename ConvertWordTypeToUint32<R>::type
+  convertFunctionWordToUint32(typename ConvertWordTypeToUint32<Args>::type... args) {
+    return convertWordToUint32(F(std::forward<Args>(args)...));
+  }
+};
+template <typename... Args, auto (*F)(Args...)->void>
+struct ConvertFunctionWordToUint32<void(Args...), F> {
+  static void convertFunctionWordToUint32(typename ConvertWordTypeToUint32<Args>::type... args) {
+    F(std::forward<Args>(args)...);
+  }
+};
+
+#define CONVERT_FUNCTION_WORD_TO_UINT32(_f)                                                        \
+  &ConvertFunctionWordToUint32<decltype(_f), _f>::convertFunctionWordToUint32
 
 // These are templates and its helper for constructing signatures of functions calling into and out
 // of WASM VMs.
@@ -55,13 +79,14 @@ struct WasmFuncTypeHelper {};
 
 template <size_t N, class ReturnType, class ContextType, class ParamType, class... Args>
 struct WasmFuncTypeHelper<N, ReturnType, ContextType, ParamType, ReturnType(ContextType, Args...)> {
+  // NOLINTNEXTLINE(readability-identifier-naming)
   using type = typename WasmFuncTypeHelper<N - 1, ReturnType, ContextType, ParamType,
                                            ReturnType(ContextType, Args..., ParamType)>::type;
 };
 
 template <class ReturnType, class ContextType, class ParamType, class... Args>
 struct WasmFuncTypeHelper<0, ReturnType, ContextType, ParamType, ReturnType(ContextType, Args...)> {
-  using type = ReturnType(ContextType, Args...);
+  using type = ReturnType(ContextType, Args...); // NOLINT(readability-identifier-naming)
 };
 
 template <size_t N, class ReturnType, class ContextType, class ParamType>
@@ -74,8 +99,7 @@ template <size_t N> using WasmCallWord = std::function<WasmFuncType<N, Word, Con
 
 #define FOR_ALL_WASM_VM_EXPORTS(_f)                                                                \
   _f(WasmCallVoid<0>) _f(WasmCallVoid<1>) _f(WasmCallVoid<2>) _f(WasmCallVoid<3>)                  \
-      _f(WasmCallVoid<4>) _f(WasmCallVoid<5>) _f(WasmCallVoid<8>) _f(WasmCallWord<0>)              \
-          _f(WasmCallWord<1>) _f(WasmCallWord<3>)
+      _f(WasmCallVoid<5>) _f(WasmCallWord<1>) _f(WasmCallWord<2>) _f(WasmCallWord<3>)
 
 // Calls out of the WASM VM.
 // 1st arg is always a pointer to raw_context (void*).
@@ -87,15 +111,24 @@ template <size_t N> using WasmCallbackWord = WasmFuncType<N, Word, void*, Word>*
 // Extended with W = Word
 // Z = void, j = uint32_t, l = int64_t, m = uint64_t
 using WasmCallback_WWl = Word (*)(void*, Word, int64_t);
+using WasmCallback_WWlWW = Word (*)(void*, Word, int64_t, Word, Word);
 using WasmCallback_WWm = Word (*)(void*, Word, uint64_t);
+using WasmCallback_dd = double (*)(void*, double);
 
 #define FOR_ALL_WASM_VM_IMPORTS(_f)                                                                \
   _f(WasmCallbackVoid<0>) _f(WasmCallbackVoid<1>) _f(WasmCallbackVoid<2>) _f(WasmCallbackVoid<3>)  \
       _f(WasmCallbackVoid<4>) _f(WasmCallbackWord<0>) _f(WasmCallbackWord<1>)                      \
           _f(WasmCallbackWord<2>) _f(WasmCallbackWord<3>) _f(WasmCallbackWord<4>)                  \
               _f(WasmCallbackWord<5>) _f(WasmCallbackWord<6>) _f(WasmCallbackWord<7>)              \
-                  _f(WasmCallbackWord<8>) _f(WasmCallbackWord<9>) _f(WasmCallback_WWl)             \
-                      _f(WasmCallback_WWm)
+                  _f(WasmCallbackWord<8>) _f(WasmCallbackWord<9>) _f(WasmCallbackWord<10>)         \
+                      _f(WasmCallback_WWl) _f(WasmCallback_WWlWW) _f(WasmCallback_WWm)             \
+                          _f(WasmCallback_dd)
+
+enum class Cloneable {
+  NotCloneable,      // VMs can not be cloned and should be created from scratch.
+  CompiledBytecode,  // VMs can be cloned with compiled bytecode.
+  InstantiatedModule // VMs can be cloned from an instantiated module.
+};
 
 // Wasm VM instance. Provides the low level WASM interface.
 class WasmVm : public Logger::Loggable<Logger::Id::wasm> {
@@ -104,10 +137,10 @@ public:
 
   virtual ~WasmVm() = default;
   /**
-   * Return the VM identifier.
-   * @return one of WasmVmValues from well_known_names.h e.g. "envoy.wasm.vm.null".
+   * Return the runtime identifier.
+   * @return one of WasmRuntimeValues from well_known_names.h (e.g. "envoy.wasm.runtime.null").
    */
-  virtual absl::string_view vm() PURE;
+  virtual absl::string_view runtime() PURE;
 
   /**
    * Whether or not the VM implementation supports cloning. Cloning is VM system dependent.
@@ -116,9 +149,9 @@ public:
    * compilation. Then, if cloning is supported, we clone that VM for each worker, potentially
    * copying and sharing the initialized data structures for efficiency. Otherwise we create an new
    * VM from scratch for each worker.
-   * @return true if the VM is cloneable.
+   * @return one of enum Cloneable with the VMs cloneability.
    */
-  virtual bool cloneable() PURE;
+  virtual Cloneable cloneable() PURE;
 
   /**
    * Make a worker/thread-specific copy if supported by the underlying VM system (see cloneable()
@@ -142,33 +175,12 @@ public:
   virtual bool load(const std::string& code, bool allow_precompiled) PURE;
 
   /**
-   * Link the WASM code to the host-provided functions and globals, e.g. the ABI. Prior to linking,
-   * the module should be loaded and the ABI callbacks registered (see above). Linking should be
-   * done once between load() and start().
+   * Link the WASM code to the host-provided functions, e.g. the ABI. Prior to linking, the module
+   * should be loaded and the ABI callbacks registered (see above). Linking should be done once
+   * after load().
    * @param debug_name user-provided name for use in log and error messages.
-   * @param needs_emscripten whether emscripten support should be provided (e.g.
-   * _emscripten_memcpy_bigHandler). Emscripten (http://https://emscripten.org/) is
-   * a C++ WebAssembly tool chain.
    */
-  virtual void link(absl::string_view debug_name, bool needs_emscripten) PURE;
-
-  /**
-   * Set memory layout (start of dynamic heap base, etc.) in the VM.
-   * @param stack_base the location in VM memory of the stack.
-   * @param heap_base the location in VM memory of the heap.
-   * @param heap_base_ptr the location in VM memory of a location to store the heap pointer.
-   */
-  virtual void setMemoryLayout(uint64_t stack_base, uint64_t heap_base,
-                               uint64_t heap_base_pointer) PURE;
-
-  /**
-   * Initialize globals (including calling global constructors) and call the 'start' function.
-   * Prior to calling start() the module should be load()ed, ABI callbacks should be registered
-   * (registerCallback), the module link()ed, and any exported functions should be gotten
-   * (getFunction).
-   * @param vm_context a context which represents the caller: in this case Envoy itself.
-   */
-  virtual void start(Context* vm_context) PURE;
+  virtual void link(absl::string_view debug_name) PURE;
 
   /**
    * Get size of the currently allocated memory in the VM.
@@ -184,15 +196,6 @@ public:
    * a host string_view pointing to the pointer/size pair in VM memory.
    */
   virtual absl::optional<absl::string_view> getMemory(uint64_t pointer, uint64_t size) PURE;
-
-  /**
-   * Convert a host pointer to memory in the VM into a VM "pointer" (an offset into the Memory).
-   * @param host_pointer a pointer to host memory to be converted into a VM offset (pointer).
-   * @param vm_pointer a pointer to an uint64_t to be filled with the offset in VM memory
-   * corresponding to 'host_pointer'.
-   * @return whether or not the host_pointer was a valid VM memory offset.
-   */
-  virtual bool getMemoryOffset(void* host_pointer, uint64_t* vm_pointer) PURE;
 
   /**
    * Set a block of memory in the VM, returns true on success, false if the pointer/size is invalid.
@@ -225,18 +228,18 @@ public:
   virtual bool setWord(uint64_t pointer, Word data) PURE;
 
   /**
-   * Make a new intrinsic module (e.g. for Emscripten support).
-   * @param name the name of the module to make.
-   */
-  virtual void makeModule(absl::string_view name) PURE;
-
-  /**
-   * Get the contents of the user section with the given name or "" if it does not exist.
-   * @param name the name of the user section to get.
-   * @return the contents of the user section (if any). The result will be empty() if there
+   * Get the contents of the custom section with the given name or "" if it does not exist.
+   * @param name the name of the custom section to get.
+   * @return the contents of the custom section (if any). The result will be empty if there
    * is no such section.
    */
-  virtual absl::string_view getUserSection(absl::string_view name) PURE;
+  virtual absl::string_view getCustomSection(absl::string_view name) PURE;
+
+  /**
+   * Get the name of the custom section that contains precompiled module.
+   * @return the name of the custom section that contains precompiled module.
+   */
+  virtual absl::string_view getPrecompiledSectionName() PURE;
 
   /**
    * Get typed function exported by the WASM module.
@@ -253,26 +256,6 @@ public:
                                 _T f, typename ConvertFunctionTypeWordToUint32<_T>::type) PURE;
   FOR_ALL_WASM_VM_IMPORTS(_REGISTER_CALLBACK)
 #undef _REGISTER_CALLBACK
-
-  /**
-   * Register typed value exported by the host environment.
-   * @param module_name the name of the module to which to export the global.
-   * @param name the name of the global variable to export.
-   * @param initial_value the initial value of the global.
-   * @return a Global object which can be used to access the exported global.
-   */
-  virtual std::unique_ptr<Global<Word>> makeGlobal(absl::string_view module_name,
-                                                   absl::string_view name, Word initial_value) PURE;
-
-  /**
-   * Register typed value exported by the host environment.
-   * @param module_name the name of the module to which to export the global.
-   * @param name the name of the global variable to export.
-   * @param initial_value the initial value of the global.
-   * @return a Global object which can be used to access the exported global.
-   */
-  virtual std::unique_ptr<Global<double>>
-  makeGlobal(absl::string_view module_name, absl::string_view name, double initial_value) PURE;
 };
 using WasmVmPtr = std::unique_ptr<WasmVm>;
 
@@ -317,8 +300,8 @@ struct SaveRestoreContext {
   uint32_t saved_effective_context_id_;
 };
 
-// Create a new low-level WASM VM of the give type (e.g. "envoy.wasm.vm.wavm").
-WasmVmPtr createWasmVm(absl::string_view vm);
+// Create a new low-level WASM VM using runtime of the given type (e.g. "envoy.wasm.runtime.wavm").
+WasmVmPtr createWasmVm(absl::string_view runtime, const Stats::ScopeSharedPtr& scope);
 
 } // namespace Wasm
 } // namespace Common

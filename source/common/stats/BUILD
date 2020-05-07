@@ -19,6 +19,7 @@ envoy_cc_library(
         "//source/common/common:hash_lib",
         "//source/common/common:thread_annotations",
         "//source/common/common:thread_lib",
+        "//source/common/common:thread_synchronizer_lib",
         "//source/common/common:utility_lib",
     ],
 )
@@ -47,10 +48,12 @@ envoy_cc_library(
         ":histogram_lib",
         ":null_counter_lib",
         ":null_gauge_lib",
+        ":null_text_readout_lib",
         ":scope_prefixer_lib",
         ":stats_lib",
         ":store_impl_lib",
         ":symbol_table_creator_lib",
+        ":tag_utility_lib",
         "//include/envoy/stats:stats_macros",
         "//source/common/stats:allocator_lib",
     ],
@@ -64,6 +67,17 @@ envoy_cc_library(
         ":symbol_table_lib",
         "//include/envoy/stats:stats_interface",
         "//source/common/common:assert_lib",
+    ],
+)
+
+envoy_cc_library(
+    name = "tag_utility_lib",
+    srcs = ["tag_utility.cc"],
+    hdrs = ["tag_utility.h"],
+    deps = [
+        ":symbol_table_lib",
+        "//include/envoy/stats:stats_interface",
+        "//include/envoy/stats:symbol_table_interface",
     ],
 )
 
@@ -84,6 +98,25 @@ envoy_cc_library(
         ":metric_impl_lib",
         ":symbol_table_lib",
         "//include/envoy/stats:stats_interface",
+    ],
+)
+
+envoy_cc_library(
+    name = "null_text_readout_lib",
+    hdrs = ["null_text_readout.h"],
+    deps = [
+        ":metric_impl_lib",
+        ":symbol_table_lib",
+        "//include/envoy/stats:stats_interface",
+    ],
+)
+
+envoy_cc_library(
+    name = "recent_lookups_lib",
+    srcs = ["recent_lookups.cc"],
+    hdrs = ["recent_lookups.h"],
+    deps = [
+        "//source/common/common:assert_lib",
     ],
 )
 
@@ -137,7 +170,6 @@ envoy_cc_library(
         "//source/common/common:utility_lib",
         "//source/common/protobuf",
         "//source/common/singleton:const_singleton",
-        "@envoy_api//envoy/config/metrics/v2:stats_cc",
     ],
 )
 
@@ -147,10 +179,11 @@ envoy_cc_library(
     hdrs = ["symbol_table_impl.h"],
     external_deps = ["abseil_base"],
     deps = [
+        ":recent_lookups_lib",
         "//include/envoy/stats:symbol_table_interface",
         "//source/common/common:assert_lib",
         "//source/common/common:logger_lib",
-        "//source/common/common:stack_array",
+        "//source/common/common:mem_block_builder_lib",
         "//source/common/common:thread_lib",
         "//source/common/common:utility_lib",
     ],
@@ -194,7 +227,7 @@ envoy_cc_library(
         "//source/common/common:perf_annotation_lib",
         "//source/common/config:well_known_names",
         "//source/common/protobuf",
-        "@envoy_api//envoy/config/metrics/v2:stats_cc",
+        "@envoy_api//envoy/config/metrics/v3:pkg_cc_proto",
     ],
 )
 
@@ -206,7 +239,7 @@ envoy_cc_library(
         "//include/envoy/stats:stats_interface",
         "//source/common/common:matchers_lib",
         "//source/common/protobuf",
-        "@envoy_api//envoy/config/metrics/v2:stats_cc",
+        "@envoy_api//envoy/config/metrics/v3:pkg_cc_proto",
     ],
 )
 
@@ -218,11 +251,25 @@ envoy_cc_library(
         ":allocator_lib",
         ":null_counter_lib",
         ":null_gauge_lib",
+        ":null_text_readout_lib",
         ":scope_prefixer_lib",
         ":stats_lib",
         ":stats_matcher_lib",
         ":tag_producer_lib",
+        ":tag_utility_lib",
         "//include/envoy/thread_local:thread_local_interface",
+    ],
+)
+
+envoy_cc_library(
+    name = "timespan_lib",
+    srcs = ["timespan_impl.cc"],
+    hdrs = ["timespan_impl.h"],
+    deps = [
+        "//include/envoy/common:time_interface",
+        "//include/envoy/stats:stats_interface",
+        "//include/envoy/stats:timespan_interface",
+        "//source/common/common:assert_lib",
     ],
 )
 

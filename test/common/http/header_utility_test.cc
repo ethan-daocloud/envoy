@@ -1,7 +1,7 @@
 #include <regex>
 #include <vector>
 
-#include "envoy/api/v2/route/route.pb.h"
+#include "envoy/config/route/v3/route_components.pb.h"
 #include "envoy/json/json_object.h"
 
 #include "common/http/header_utility.h"
@@ -14,21 +14,10 @@
 namespace Envoy {
 namespace Http {
 
-envoy::api::v2::route::HeaderMatcher parseHeaderMatcherFromYaml(const std::string& yaml) {
-  envoy::api::v2::route::HeaderMatcher header_matcher;
+envoy::config::route::v3::HeaderMatcher parseHeaderMatcherFromYaml(const std::string& yaml) {
+  envoy::config::route::v3::HeaderMatcher header_matcher;
   TestUtility::loadFromYaml(yaml, header_matcher);
   return header_matcher;
-}
-
-TEST(HeaderDataConstructorTest, JsonConstructor) {
-  Json::ObjectSharedPtr json =
-      Json::Factory::loadFromString("{\"name\":\"test-header\", \"value\":\"value\"}");
-
-  HeaderUtility::HeaderData header_data = HeaderUtility::HeaderData(*json);
-
-  EXPECT_EQ("test-header", header_data.name_.get());
-  EXPECT_EQ(HeaderUtility::HeaderMatchType::Value, header_data.header_match_type_);
-  EXPECT_EQ("value", header_data.value_);
 }
 
 TEST(HeaderDataConstructorTest, NoSpecifierSet) {
@@ -461,18 +450,29 @@ TEST(HeaderIsValidTest, InvalidHeaderValuesAreRejected) {
   // values 9, 10, and 13 which are a horizontal tab, line feed, and carriage
   // return, respectively), and are not valid in an HTTP header, per
   // RFC 7230, section 3.2
-  for (uint i = 0; i < 32; i++) {
+  for (int i = 0; i < 32; i++) {
     if (i == 9) {
       continue;
     }
 
-    EXPECT_FALSE(HeaderUtility::headerIsValid(std::string(1, i)));
+    EXPECT_FALSE(HeaderUtility::headerValueIsValid(std::string(1, i)));
   }
 }
 
 TEST(HeaderIsValidTest, ValidHeaderValuesAreAccepted) {
-  EXPECT_TRUE(HeaderUtility::headerIsValid("some-value"));
-  EXPECT_TRUE(HeaderUtility::headerIsValid("Some Other Value"));
+  EXPECT_TRUE(HeaderUtility::headerValueIsValid("some-value"));
+  EXPECT_TRUE(HeaderUtility::headerValueIsValid("Some Other Value"));
+}
+
+TEST(HeaderIsValidTest, AuthorityIsValid) {
+  EXPECT_TRUE(HeaderUtility::authorityIsValid("strangebutlegal$-%&'"));
+  EXPECT_FALSE(HeaderUtility::authorityIsValid("illegal{}"));
+}
+
+TEST(HeaderIsValidTest, IsConnect) {
+  EXPECT_TRUE(HeaderUtility::isConnect(Http::TestRequestHeaderMapImpl{{":method", "CONNECT"}}));
+  EXPECT_FALSE(HeaderUtility::isConnect(Http::TestRequestHeaderMapImpl{{":method", "GET"}}));
+  EXPECT_FALSE(HeaderUtility::isConnect(Http::TestRequestHeaderMapImpl{}));
 }
 
 TEST(HeaderAddTest, HeaderAdd) {
@@ -489,6 +489,14 @@ TEST(HeaderAddTest, HeaderAdd) {
         return Http::HeaderMap::Iterate::Continue;
       },
       &headers);
+}
+
+TEST(HeaderIsValidTest, HeaderNameContainsUnderscore) {
+  EXPECT_FALSE(HeaderUtility::headerNameContainsUnderscore("cookie"));
+  EXPECT_FALSE(HeaderUtility::headerNameContainsUnderscore("x-something"));
+  EXPECT_TRUE(HeaderUtility::headerNameContainsUnderscore("_cookie"));
+  EXPECT_TRUE(HeaderUtility::headerNameContainsUnderscore("cookie_"));
+  EXPECT_TRUE(HeaderUtility::headerNameContainsUnderscore("x_something"));
 }
 
 } // namespace Http

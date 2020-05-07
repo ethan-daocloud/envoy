@@ -3,6 +3,7 @@
 #include "common/protobuf/message_validator_impl.h"
 #include "common/stats/isolated_store_impl.h"
 
+#include "test/common/stats/stat_test_utility.h"
 #include "test/test_common/logging.h"
 #include "test/test_common/utility.h"
 
@@ -20,7 +21,7 @@ TEST(NullValidationVisitorImpl, UnknownField) {
 
 // The warning validation visitor logs and bumps stats on unknown fields
 TEST(WarningValidationVisitorImpl, UnknownField) {
-  Stats::IsolatedStoreImpl stats;
+  Stats::TestUtil::TestStore stats;
   Stats::Counter& counter = stats.counter("counter");
   WarningValidationVisitorImpl warning_validation_visitor;
   // First time around we should log.
@@ -45,7 +46,8 @@ TEST(WarningValidationVisitorImpl, UnknownField) {
 // The strict validation visitor throws on unknown fields.
 TEST(StrictValidationVisitorImpl, UnknownField) {
   StrictValidationVisitorImpl strict_validation_visitor;
-  EXPECT_THROW_WITH_MESSAGE(strict_validation_visitor.onUnknownField("foo"), EnvoyException,
+  EXPECT_THROW_WITH_MESSAGE(strict_validation_visitor.onUnknownField("foo"),
+                            UnknownProtoFieldException,
                             "Protobuf message (foo) has unknown fields");
 }
 

@@ -41,13 +41,10 @@ be found in the following repositories:
 * `envoyproxy/envoy-alpine-debug <https://hub.docker.com/r/envoyproxy/envoy-alpine-debug/tags/>`_:
   Release binary with debug symbols on top of a **glibc** alpine base.
 
-In the above repositories, the *latest* tag points to the latest official release.
-
 .. note::
 
-  The above repositories used to contain the dev images described below. They remain to avoid
-  breaking existing users. New dev images are added to the repositories described in the following
-  section.
+  In the above repositories, we do **not** tag a *latest* image. As we now do security/stable
+  releases, *latest* has no good meaning and users should pin to a specific tag.
 
 On every master commit we additionally create a set of development Docker images. These images can
 be found in the following repositories:
@@ -83,6 +80,6 @@ is to use Docker. This guide will walk through the process of building your own
 Envoy binary, and putting the binary in an Ubuntu container.
 
 .. toctree::
-    :maxdepth: 1
+    :maxdepth: 2
 
     sandboxes/local_docker_build

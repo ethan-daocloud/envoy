@@ -3,10 +3,16 @@
 #include <cstdint>
 #include <memory>
 
+#include "envoy/http/codec.h"
+
 #include "common/common/enum_to_int.h"
+#include "common/config/utility.h"
 #include "common/http/exception.h"
 #include "common/http/http1/codec_impl.h"
 #include "common/http/http2/codec_impl.h"
+#include "common/http/http3/quic_codec_factory.h"
+#include "common/http/http3/well_known_names.h"
+#include "common/http/status.h"
 #include "common/http/utility.h"
 
 namespace Envoy {
@@ -17,9 +23,12 @@ CodecClient::CodecClient(Type type, Network::ClientConnectionPtr&& connection,
                          Event::Dispatcher& dispatcher)
     : type_(type), connection_(std::move(connection)), host_(host),
       idle_timeout_(host_->cluster().idleTimeout()) {
-  // Make sure upstream connections process data and then the FIN, rather than processing
-  // TCP disconnects immediately. (see https://github.com/envoyproxy/envoy/issues/1679 for details)
-  connection_->detectEarlyCloseWhenReadDisabled(false);
+  if (type_ != Type::HTTP3) {
+    // Make sure upstream connections process data and then the FIN, rather than processing
+    // TCP disconnects immediately. (see https://github.com/envoyproxy/envoy/issues/1679 for
+    // details)
+    connection_->detectEarlyCloseWhenReadDisabled(false);
+  }
   connection_->addConnectionCallbacks(*this);
   connection_->addReadFilter(Network::ReadFilterSharedPtr{new CodecReadFilter(*this)});
 
@@ -50,7 +59,7 @@ void CodecClient::deleteRequest(ActiveRequest& request) {
   }
 }
 
-StreamEncoder& CodecClient::newStream(StreamDecoder& response_decoder) {
+RequestEncoder& CodecClient::newStream(ResponseDecoder& response_decoder) {
   ActiveRequestPtr request(new ActiveRequest(*this, response_decoder));
   request->encoder_ = &codec_->newStream(*request);
   request->encoder_->getStream().addCallbacks(*request);
@@ -113,19 +122,18 @@ void CodecClient::onReset(ActiveRequest& request, StreamResetReason reason) {
 
 void CodecClient::onData(Buffer::Instance& data) {
   bool protocol_error = false;
-  try {
-    codec_->dispatch(data);
-  } catch (CodecProtocolException& e) {
-    ENVOY_CONN_LOG(debug, "protocol error: {}", *connection_, e.what());
+  const Status status = codec_->dispatch(data);
+
+  if (isCodecProtocolError(status)) {
+    ENVOY_CONN_LOG(debug, "protocol error: {}", *connection_, status.message());
     close();
     protocol_error = true;
-  } catch (PrematureResponseException& e) {
+  } else if (isPrematureResponseError(status)) {
     ENVOY_CONN_LOG(debug, "premature response", *connection_);
     close();
 
     // Don't count 408 responses where we have no active requests as protocol errors
-    if (!active_requests_.empty() ||
-        Utility::getResponseStatus(e.headers()) != enumToInt(Code::RequestTimeout)) {
+    if (!active_requests_.empty() || getPrematureResponseHttpCode(status) != Code::RequestTimeout) {
       protocol_error = true;
     }
   }
@@ -141,15 +149,23 @@ CodecClientProd::CodecClientProd(Type type, Network::ClientConnectionPtr&& conne
     : CodecClient(type, std::move(connection), host, dispatcher) {
   switch (type) {
   case Type::HTTP1: {
-    codec_ = std::make_unique<Http1::ClientConnectionImpl>(*connection_,
-                                                           host->cluster().statsScope(), *this);
+    codec_ = std::make_unique<Http1::ClientConnectionImpl>(
+        *connection_, host->cluster().statsScope(), *this, host->cluster().http1Settings(),
+        host->cluster().maxResponseHeadersCount());
     break;
   }
   case Type::HTTP2: {
     codec_ = std::make_unique<Http2::ClientConnectionImpl>(
-        *connection_, *this, host->cluster().statsScope(), host->cluster().http2Settings(),
-        Http::DEFAULT_MAX_REQUEST_HEADERS_KB);
+        *connection_, *this, host->cluster().statsScope(), host->cluster().http2Options(),
+        Http::DEFAULT_MAX_REQUEST_HEADERS_KB, host->cluster().maxResponseHeadersCount(),
+        Http2::ProdNghttp2SessionFactory::get());
     break;
+  }
+  case Type::HTTP3: {
+    codec_ = std::unique_ptr<ClientConnection>(
+        Config::Utility::getAndCheckFactoryByName<Http::QuicHttpClientConnectionFactory>(
+            Http::QuicCodecNames::get().Quiche)
+            .createQuicClientConnection(*connection_, *this));
   }
   }
 }

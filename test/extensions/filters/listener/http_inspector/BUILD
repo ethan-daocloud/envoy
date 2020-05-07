@@ -2,7 +2,6 @@ licenses(["notice"])  # Apache 2
 
 load(
     "//bazel:envoy_build_system.bzl",
-    "envoy_cc_test",
     "envoy_package",
 )
 load(
@@ -16,6 +15,7 @@ envoy_extension_cc_test(
     name = "http_inspector_test",
     srcs = ["http_inspector_test.cc"],
     extension_name = "envoy.filters.listener.http_inspector",
+    tags = ["fails_on_windows"],
     deps = [
         "//source/common/common:hex_lib",
         "//source/extensions/filters/listener/http_inspector:http_inspector_lib",

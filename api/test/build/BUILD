@@ -1,22 +1,17 @@
-load("@envoy_api//bazel:api_build_system.bzl", "api_cc_test", "api_go_test")
-
 licenses(["notice"])  # Apache 2
+
+load("@envoy_api//bazel:api_build_system.bzl", "api_cc_test", "api_go_test")
 
 api_cc_test(
     name = "build_test",
     srcs = ["build_test.cc"],
-    proto_deps = [
-        "//envoy/api/v2:cds",
-        "//envoy/api/v2:eds",
-        "//envoy/api/v2:lds",
-        "//envoy/api/v2:rds",
-        "//envoy/service/accesslog/v2:als",
-        "//envoy/service/discovery/v2:ads",
-        "//envoy/service/discovery/v2:hds",
-        "//envoy/service/discovery/v2:rtds",
-        "//envoy/service/metrics/v2:metrics_service",
-        "//envoy/service/ratelimit/v2:rls",
-        "@com_github_cncf_udpa//udpa/service/orca/v1:orca",
+    deps = [
+        "//envoy/api/v2:pkg_cc_proto",
+        "//envoy/service/accesslog/v2:pkg_cc_proto",
+        "//envoy/service/discovery/v2:pkg_cc_proto",
+        "//envoy/service/metrics/v2:pkg_cc_proto",
+        "//envoy/service/ratelimit/v2:pkg_cc_proto",
+        "@com_github_cncf_udpa//udpa/service/orca/v1:pkg_cc_proto",
     ],
 )
 
@@ -26,8 +21,8 @@ api_go_test(
     srcs = ["go_build_test.go"],
     importpath = "go_build_test",
     deps = [
-        "//envoy/api/v2:v2_go_proto",
-        "//envoy/api/v2/auth:auth_go_proto",
+        "//envoy/api/v2:pkg_go_proto",
+        "//envoy/api/v2/auth:pkg_go_proto",
         "//envoy/config/bootstrap/v2:pkg_go_proto",
         "//envoy/service/accesslog/v2:pkg_go_proto",
         "//envoy/service/discovery/v2:pkg_go_proto",

@@ -5,4 +5,5 @@ Observability
   :maxdepth: 2
 
   statistics
-  access_log
+  application_logging
+  access_log/access_log.rst

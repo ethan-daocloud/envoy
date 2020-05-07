@@ -11,22 +11,29 @@ def envoy_copts(repository, test = False):
         "-Wnon-virtual-dtor",
         "-Woverloaded-virtual",
         "-Wold-style-cast",
+        "-Wformat",
+        "-Wformat-security",
         "-Wvla",
         "-std=c++14",
     ]
 
+    # Windows options for cleanest service compilation;
+    #   General MSVC C++ options for Envoy current expectations.
+    #   Target windows.h for all Windows 10 (0x0A) API prototypes (ntohll etc)
+    #   (See https://msdn.microsoft.com/en-us/library/windows/desktop/aa383745(v=vs.85).aspx )
+    #   Optimize Windows headers by dropping GUI-oriented features from compilation
     msvc_options = [
         "-WX",
         "-Zc:__cplusplus",
         "-std:c++14",
         "-DWIN32",
+        "-D_WIN32_WINNT=0x0A00",  # _WIN32_WINNT_WIN10
+        "-DNTDDI_VERSION=0x0A000000",  # NTDDI_WIN10
         "-DWIN32_LEAN_AND_MEAN",
-        # need win8 for ntohll
-        # https://msdn.microsoft.com/en-us/library/windows/desktop/aa383745(v=vs.85).aspx
-        "-D_WIN32_WINNT=0x0602",
-        "-DNTDDI_VERSION=0x06020000",
-        "-DCARES_STATICLIB",
-        "-DNGHTTP2_STATICLIB",
+        "-DNOUSER",
+        "-DNOMCX",
+        "-DNOIME",
+        "-DNOCRYPT",
     ]
 
     return select({
@@ -43,6 +50,9 @@ def envoy_copts(repository, test = False):
            }) + select({
                repository + "//bazel:clang_build": ["-fno-limit-debug-info", "-Wgnu-conditional-omitted-operand"],
                repository + "//bazel:gcc_build": ["-Wno-maybe-uninitialized"],
+               "//conditions:default": [],
+           }) + select({
+               repository + "//bazel:no_debug_info": ["-g0"],
                "//conditions:default": [],
            }) + select({
                repository + "//bazel:disable_tcmalloc": ["-DABSL_MALLOC_HOOK_MMAP_DISABLE"],
@@ -63,6 +73,9 @@ def envoy_copts(repository, test = False):
                repository + "//bazel:enable_log_debug_assert_in_release": ["-DENVOY_LOG_DEBUG_ASSERT_IN_RELEASE"],
                "//conditions:default": [],
            }) + select({
+               repository + "//bazel:disable_known_issue_asserts": ["-DENVOY_DISABLE_KNOWN_ISSUE_ASSERTS"],
+               "//conditions:default": [],
+           }) + select({
                # APPLE_USE_RFC_3542 is needed to support IPV6_PKTINFO in MAC OS.
                repository + "//bazel:apple": ["-D__APPLE_USE_RFC_3542"],
                "//conditions:default": [],
@@ -77,7 +90,7 @@ def envoy_external_dep_path(dep):
 
 def envoy_linkstatic():
     return select({
-        "@envoy//bazel:asan_build": 0,
+        "@envoy//bazel:dynamic_link_tests": 0,
         "//conditions:default": 1,
     })
 
@@ -92,6 +105,7 @@ def envoy_select_force_libcpp(if_libcpp, default = None):
 def envoy_stdlib_deps():
     return select({
         "@envoy//bazel:asan_build": ["@envoy//bazel:dynamic_stdlib"],
+        "@envoy//bazel:msan_build": ["@envoy//bazel:dynamic_stdlib"],
         "@envoy//bazel:tsan_build": ["@envoy//bazel:dynamic_stdlib"],
         "//conditions:default": ["@envoy//bazel:static_stdlib"],
     })

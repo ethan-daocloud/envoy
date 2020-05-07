@@ -8,26 +8,26 @@ Dynamic forward proxy
   HTTP dynamic forward proxy support should be considered alpha and not production ready.
 
 * HTTP dynamic forward proxy :ref:`architecture overview <arch_overview_http_dynamic_forward_proxy>`
-* :ref:`v2 API reference <envoy_api_msg_config.filter.http.dynamic_forward_proxy.v2alpha.FilterConfig>`
+* :ref:`v3 API reference <envoy_v3_api_msg_extensions.filters.http.dynamic_forward_proxy.v3.FilterConfig>`
 * This filter should be configured with the name *envoy.filters.http.dynamic_forward_proxy*
 
 The following is a complete configuration that configures both the
 :ref:`dynamic forward proxy HTTP filter
-<envoy_api_msg_config.filter.http.dynamic_forward_proxy.v2alpha.FilterConfig>`
+<envoy_v3_api_msg_extensions.filters.http.dynamic_forward_proxy.v3.FilterConfig>`
 as well as the :ref:`dynamic forward proxy cluster
-<envoy_api_msg_config.cluster.dynamic_forward_proxy.v2alpha.ClusterConfig>`. Both filter and cluster
+<envoy_v3_api_msg_extensions.clusters.dynamic_forward_proxy.v3.ClusterConfig>`. Both filter and cluster
 must be configured together and point to the same DNS cache parameters for Envoy to operate as an
 HTTP dynamic forward proxy.
 
+This filter supports :ref:`host rewrite <envoy_v3_api_msg_extensions.filters.http.dynamic_forward_proxy.v3.FilterConfig>`
+via the :ref:`virtual host's typed_per_filter_config <envoy_v3_api_field_config.route.v3.VirtualHost.typed_per_filter_config>` or the
+:ref:`route's typed_per_filter_config <envoy_v3_api_field_config.route.v3.Route.typed_per_filter_config>`. This can be used to rewrite
+the host header with the provided value before DNS lookup, thus allowing to route traffic to the rewritten
+host when forwarding. See the example below within the configured routes.
+
 .. note::
 
-  The HTTP connection manager :ref:`allow_absolute_url
-  <envoy_api_field_core.Http1ProtocolOptions.allow_absolute_url>` parameter has been set to true
-  to allow Envoy to proxy absolute HTTP URLs.
-
-.. note::
-
-  Configuring a :ref:`tls_context <envoy_api_field_Cluster.tls_Context>` on the cluster with
+  Configuring a :ref:`transport_socket with name envoy.transport_sockets.tls <envoy_v3_api_field_config.cluster.v3.Cluster.transport_socket>` on the cluster with
   *trusted_ca* certificates instructs Envoy to use TLS when connecting to upstream hosts and verify
   the certificate chain. Additionally, Envoy will automatically perform SAN verification for the
   resolved host name as well as specify the host name via SNI.
@@ -51,12 +51,10 @@ HTTP dynamic forward proxy.
           port_value: 10000
       filter_chains:
       - filters:
-        - name: envoy.http_connection_manager
+        - name: envoy.filters.network.http_connection_manager
           typed_config:
-            "@type": type.googleapis.com/envoy.config.filter.network.http_connection_manager.v2.HttpConnectionManager
+            "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
             stat_prefix: ingress_http
-            http_protocol_options:
-              allow_absolute_url: true
             route_config:
               name: local_route
               virtual_hosts:
@@ -64,16 +62,27 @@ HTTP dynamic forward proxy.
                 domains: ["*"]
                 routes:
                 - match:
+                    prefix: "/force-host-rewrite"
+                  route:
+                    cluster: dynamic_forward_proxy_cluster
+                  typed_per_filter_config:
+                    envoy.filters.http.dynamic_forward_proxy:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_forward_proxy.v3.PerRouteConfig
+                      host_rewrite_literal: www.example.org
+                - match:
                     prefix: "/"
                   route:
                     cluster: dynamic_forward_proxy_cluster
             http_filters:
             - name: envoy.filters.http.dynamic_forward_proxy
-              config:
+              typed_config:
+                "@type": type.googleapis.com/envoy.config.filter.http.dynamic_forward_proxy.v2alpha.FilterConfig
                 dns_cache_config:
                   name: dynamic_forward_proxy_cache_config
                   dns_lookup_family: V4_ONLY
-            - name: envoy.router
+            - name: envoy.filters.http.router
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
     clusters:
     - name: dynamic_forward_proxy_cluster
       connect_timeout: 1s
@@ -81,14 +90,17 @@ HTTP dynamic forward proxy.
       cluster_type:
         name: envoy.clusters.dynamic_forward_proxy
         typed_config:
-          "@type": type.googleapis.com/envoy.config.cluster.dynamic_forward_proxy.v2alpha.ClusterConfig
+          "@type": type.googleapis.com/envoy.extensions.clusters.dynamic_forward_proxy.v3.ClusterConfig
           dns_cache_config:
             name: dynamic_forward_proxy_cache_config
             dns_lookup_family: V4_ONLY
-      tls_context:
-        common_tls_context:
-          validation_context:
-            trusted_ca: {filename: /etc/ssl/certs/ca-certificates.crt}
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          common_tls_context:
+            validation_context:
+              trusted_ca: {filename: /etc/ssl/certs/ca-certificates.crt}
 
 Statistics
 ----------

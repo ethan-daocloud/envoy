@@ -1,4 +1,4 @@
-#include <unistd.h>
+#include "envoy/common/platform.h"
 
 #include "common/common/lock_guard.h"
 #include "common/common/mutex_tracer_impl.h"
@@ -30,13 +30,13 @@ namespace Envoy {
  * Captures common functions needed for invoking MainCommon. Generates a
  * unique --base-id setting based on the pid and a random number. Maintains
  * an argv array that is terminated with nullptr. Identifies the config
- * file relative to $TEST_RUNDIR.
+ * file relative to runfiles directory.
  */
 class MainCommonTest : public testing::TestWithParam<Network::Address::IpVersion> {
 protected:
   MainCommonTest()
       : config_file_(TestEnvironment::temporaryFileSubstitute(
-            "/test/config/integration/google_com_proxy_port_0.v2.yaml", TestEnvironment::ParamMap(),
+            "test/config/integration/google_com_proxy_port_0.v2.yaml", TestEnvironment::ParamMap(),
             TestEnvironment::PortMap(), GetParam())),
         random_string_(fmt::format("{}", computeBaseId())),
         argv_({"envoy-static", "--base-id", random_string_.c_str(), "-c", config_file_.c_str(),
@@ -59,7 +59,12 @@ protected:
     // Pick a prime number to give more of the 32-bits of entropy to the PID, and the
     // remainder to the random number.
     const uint32_t four_digit_prime = 7919;
+#ifdef WIN32
+    return ::GetCurrentProcessId() * four_digit_prime +
+           random_generator_.random() % four_digit_prime;
+#else
     return getpid() * four_digit_prime + random_generator_.random() % four_digit_prime;
+#endif
   }
 
   const char* const* argv() { return &argv_[0]; }
@@ -121,12 +126,13 @@ TEST_P(MainCommonDeathTest, OutOfMemoryHandler) {
                  "MainCommonTest::OutOfMemoryHandler not supported by this compiler configuration");
 #else
   MainCommon main_common(argc(), argv());
+#if !defined(WIN32)
+  // Resolving symbols for a backtrace takes longer than the timeout in coverage builds,
+  // so disable handling that signal.
+  signal(SIGABRT, SIG_DFL);
+#endif
   EXPECT_DEATH_LOG_TO_STDERR(
       []() {
-        // Resolving symbols for a backtrace takes longer than the timeout in coverage builds,
-        // so disable handling that signal.
-        signal(SIGABRT, SIG_DFL);
-
         // Allocating a fixed-size large array that results in OOM on gcc
         // results in a compile-time error on clang of "array size too big",
         // so dynamically find a size that is too large.
@@ -245,6 +251,8 @@ TEST_P(AdminRequestTest, AdminRequestGetStatsAndQuit) {
   EXPECT_TRUE(waitForEnvoyToExit());
 }
 
+// no signals on Windows -- could probably make this work with GenerateConsoleCtrlEvent
+#ifndef WIN32
 // This test is identical to the above one, except that instead of using an admin /quitquitquit,
 // we send ourselves a SIGTERM, which should have the same effect.
 TEST_P(AdminRequestTest, AdminRequestGetStatsAndKill) {
@@ -302,6 +310,7 @@ TEST_P(AdminRequestTest, AdminRequestContentionEnabled) {
   kill(getpid(), SIGTERM);
   EXPECT_TRUE(waitForEnvoyToExit());
 }
+#endif
 
 TEST_P(AdminRequestTest, AdminRequestBeforeRun) {
   // Induce the situation where the Envoy thread is active, and main_common_ is constructed,
@@ -392,7 +401,7 @@ TEST_P(MainCommonTest, ConstructDestructLogger) {
   VERBOSE_EXPECT_NO_THROW(MainCommon main_common(argc(), argv()));
 
   const std::string logger_name = "logger";
-  spdlog::details::log_msg log_msg(&logger_name, spdlog::level::level_enum::err, "error");
+  spdlog::details::log_msg log_msg(logger_name, spdlog::level::level_enum::err, "error");
   Logger::Registry::getSink()->log(log_msg);
 }
 

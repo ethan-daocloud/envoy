@@ -29,6 +29,7 @@ envoy_cc_library(
         "tag_extractor.h",
         "tag_producer.h",
     ],
+    external_deps = ["abseil_inlined_vector"],
     deps = [
         ":refcount_ptr_interface",
         ":symbol_table_interface",
@@ -37,24 +38,38 @@ envoy_cc_library(
 )
 
 envoy_cc_library(
+    name = "primitive_stats_interface",
+    hdrs = [
+        "primitive_stats.h",
+    ],
+    deps = [
+        "//source/common/common:assert_lib",
+        "//source/common/common:non_copyable",
+    ],
+)
+
+envoy_cc_library(
     name = "symbol_table_interface",
     hdrs = ["symbol_table.h"],
+    external_deps = ["abseil_inlined_vector"],
     deps = [
         "//source/common/common:hash_lib",
     ],
 )
 
 envoy_cc_library(
-    name = "timespan",
+    name = "timespan_interface",
     hdrs = ["timespan.h"],
-    deps = [
-        ":stats_interface",
-        "//include/envoy/common:time_interface",
-    ],
 )
 
 envoy_cc_library(
     name = "stats_macros",
     hdrs = ["stats_macros.h"],
     deps = [":stats_interface"],
+)
+
+envoy_cc_library(
+    name = "primitive_stats_macros",
+    hdrs = ["primitive_stats_macros.h"],
+    deps = [":primitive_stats_interface"],
 )

@@ -4,10 +4,12 @@
 #include <cstdint>
 #include <string>
 
-#include "envoy/api/v2/core/base.pb.h"
 #include "envoy/common/pure.h"
 #include "envoy/common/time.h"
+#include "envoy/config/core/v3/base.pb.h"
+#include "envoy/http/header_map.h"
 #include "envoy/http/protocol.h"
+#include "envoy/http/request_id_extension.h"
 #include "envoy/ssl/connection.h"
 #include "envoy/stream_info/filter_state.h"
 #include "envoy/upstream/host_description.h"
@@ -23,6 +25,11 @@ namespace Envoy {
 namespace Router {
 class RouteEntry;
 } // namespace Router
+
+namespace Upstream {
+class ClusterInfo;
+using ClusterInfoConstSharedPtr = std::shared_ptr<const ClusterInfo>;
+} // namespace Upstream
 
 namespace StreamInfo {
 
@@ -63,8 +70,12 @@ enum ResponseFlag {
   StreamIdleTimeout = 0x10000,
   // Request specified x-envoy-* header values that failed strict header checks.
   InvalidEnvoyRequestHeaders = 0x20000,
+  // Downstream request had an HTTP protocol error
+  DownstreamProtocolError = 0x40000,
+  // Upstream request reached to user defined max stream duration.
+  UpstreamMaxStreamDurationReached = 0x80000,
   // ATTENTION: MAKE SURE THIS REMAINS EQUAL TO THE LAST FLAG.
-  LastFlag = InvalidEnvoyRequestHeaders
+  LastFlag = UpstreamMaxStreamDurationReached
 };
 
 /**
@@ -82,6 +93,10 @@ struct ResponseCodeDetailValues {
   // Envoy is doing non-streaming proxying, and the request payload exceeded
   // configured limits.
   const std::string RequestPayloadTooLarge = "request_payload_too_large";
+  // Envoy is doing streaming proxying, but too much data arrived while waiting
+  // to attempt a retry.
+  const std::string RequestPayloadExceededRetryBufferLimit =
+      "request_payload_exceeded_retry_buffer_limit";
   // Envoy is doing non-streaming proxying, and the response payload exceeded
   // configured limits.
   const std::string ResponsePayloadTooLArge = "response_payload_too_large";
@@ -126,6 +141,8 @@ struct ResponseCodeDetailValues {
   const std::string UpstreamTimeout = "upstream_response_timeout";
   // The final upstream try timed out
   const std::string UpstreamPerTryTimeout = "upstream_per_try_timeout";
+  // The request was destroyed because of user defined max stream duration.
+  const std::string UpstreamMaxStreamDurationReached = "upstream_max_stream_duration_reached";
   // The upstream connection was reset before a response was started. This
   // will generally be accompanied by details about why the reset occurred.
   const std::string EarlyUpstreamReset = "upstream_reset_before_response_started";
@@ -134,6 +151,8 @@ struct ResponseCodeDetailValues {
   // indicates that original "success" headers may have been sent downstream
   // despite the subsequent failure.
   const std::string LateUpstreamReset = "upstream_reset_after_response_started";
+  // The connection is rejected due to no matching filter chain.
+  const std::string FilterChainNotFound = "filter_chain_not_found";
 };
 
 using ResponseCodeDetails = ConstSingleton<ResponseCodeDetailValues>;
@@ -356,6 +375,11 @@ public:
   virtual bool hasAnyResponseFlag() const PURE;
 
   /**
+   * @return response flags encoded as an integer.
+   */
+  virtual uint64_t responseFlags() const PURE;
+
+  /**
    * @return upstream host description.
    */
   virtual Upstream::HostDescriptionConstSharedPtr upstreamHost() const PURE;
@@ -454,8 +478,8 @@ public:
   /**
    * @return const envoy::api::v2::core::Metadata& the dynamic metadata associated with this request
    */
-  virtual envoy::api::v2::core::Metadata& dynamicMetadata() PURE;
-  virtual const envoy::api::v2::core::Metadata& dynamicMetadata() const PURE;
+  virtual envoy::config::core::v3::Metadata& dynamicMetadata() PURE;
+  virtual const envoy::config::core::v3::Metadata& dynamicMetadata() const PURE;
 
   /**
    * @param name the namespace used in the metadata in reverse DNS format, for example:
@@ -471,8 +495,16 @@ public:
    * filters (append only). Both object types can be consumed by multiple filters.
    * @return the filter state associated with this request.
    */
-  virtual FilterState& filterState() PURE;
+  virtual const FilterStateSharedPtr& filterState() PURE;
   virtual const FilterState& filterState() const PURE;
+
+  /**
+   * Filter State object to be shared between upstream and downstream filters.
+   * @param pointer to upstream connections filter state.
+   * @return pointer to filter state to be used by upstream connections.
+   */
+  virtual const FilterStateSharedPtr& upstreamFilterState() const PURE;
+  virtual void setUpstreamFilterState(const FilterStateSharedPtr& filter_state) PURE;
 
   /**
    * @param SNI value requested.
@@ -494,6 +526,39 @@ public:
    *         failed.
    */
   virtual const std::string& upstreamTransportFailureReason() const PURE;
+
+  /**
+   * @param headers request headers.
+   */
+  virtual void setRequestHeaders(const Http::RequestHeaderMap& headers) PURE;
+
+  /**
+   * @return request headers.
+   */
+  virtual const Http::RequestHeaderMap* getRequestHeaders() const PURE;
+
+  /**
+   * @param Upstream Connection's ClusterInfo.
+   */
+  virtual void
+  setUpstreamClusterInfo(const Upstream::ClusterInfoConstSharedPtr& upstream_cluster_info) PURE;
+
+  /**
+   * @return Upstream Connection's ClusterInfo.
+   * This returns an optional to differentiate between unset(absl::nullopt),
+   * no route or cluster does not exist(nullptr), and set to a valid cluster(not nullptr).
+   */
+  virtual absl::optional<Upstream::ClusterInfoConstSharedPtr> upstreamClusterInfo() const PURE;
+
+  /**
+   * @param utils The requestID utils implementation this stream uses
+   */
+  virtual void setRequestIDExtension(Http::RequestIDExtensionSharedPtr utils) PURE;
+
+  /**
+   * @return A shared pointer to the request ID utils for this stream
+   */
+  virtual Http::RequestIDExtensionSharedPtr getRequestIDExtension() const PURE;
 };
 
 } // namespace StreamInfo

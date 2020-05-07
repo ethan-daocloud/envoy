@@ -46,13 +46,14 @@ public:
   }
 
   Stats::TestSymbolTable symbol_table_;
-  Stats::IsolatedStoreImpl global_store_;
-  Stats::IsolatedStoreImpl cluster_scope_;
+  Stats::TestUtil::TestStore global_store_;
+  Stats::TestUtil::TestStore cluster_scope_;
   Http::CodeStatsImpl code_stats_;
   Stats::StatNamePool pool_;
 };
 
 TEST_F(CodeUtilityTest, GroupStrings) {
+  EXPECT_EQ("1xx", CodeUtility::groupStringForResponseCode(Code::SwitchingProtocols));
   EXPECT_EQ("2xx", CodeUtility::groupStringForResponseCode(Code::OK));
   EXPECT_EQ("3xx", CodeUtility::groupStringForResponseCode(Code::Found));
   EXPECT_EQ("4xx", CodeUtility::groupStringForResponseCode(Code::NotFound));
@@ -245,53 +246,38 @@ TEST_F(CodeUtilityTest, ResponseTimingTest) {
                                            pool_.add("from_az"),
                                            pool_.add("to_az")};
 
-  EXPECT_CALL(cluster_scope, histogram("prefix.upstream_rq_time"));
+  EXPECT_CALL(cluster_scope,
+              histogram("prefix.upstream_rq_time", Stats::Histogram::Unit::Milliseconds));
   EXPECT_CALL(cluster_scope, deliverHistogramToSinks(
                                  Property(&Stats::Metric::name, "prefix.upstream_rq_time"), 5));
 
-  EXPECT_CALL(cluster_scope, histogram("prefix.canary.upstream_rq_time"));
+  EXPECT_CALL(cluster_scope,
+              histogram("prefix.canary.upstream_rq_time", Stats::Histogram::Unit::Milliseconds));
   EXPECT_CALL(
       cluster_scope,
       deliverHistogramToSinks(Property(&Stats::Metric::name, "prefix.canary.upstream_rq_time"), 5));
 
-  EXPECT_CALL(cluster_scope, histogram("prefix.internal.upstream_rq_time"));
+  EXPECT_CALL(cluster_scope,
+              histogram("prefix.internal.upstream_rq_time", Stats::Histogram::Unit::Milliseconds));
   EXPECT_CALL(cluster_scope,
               deliverHistogramToSinks(
                   Property(&Stats::Metric::name, "prefix.internal.upstream_rq_time"), 5));
   EXPECT_CALL(global_store,
-              histogram("vhost.vhost_name.vcluster.req_vcluster_name.upstream_rq_time"));
+              histogram("vhost.vhost_name.vcluster.req_vcluster_name.upstream_rq_time",
+                        Stats::Histogram::Unit::Milliseconds));
   EXPECT_CALL(global_store,
               deliverHistogramToSinks(
                   Property(&Stats::Metric::name,
                            "vhost.vhost_name.vcluster.req_vcluster_name.upstream_rq_time"),
                   5));
 
-  EXPECT_CALL(cluster_scope, histogram("prefix.zone.from_az.to_az.upstream_rq_time"));
+  EXPECT_CALL(cluster_scope, histogram("prefix.zone.from_az.to_az.upstream_rq_time",
+                                       Stats::Histogram::Unit::Milliseconds));
   EXPECT_CALL(cluster_scope,
               deliverHistogramToSinks(
                   Property(&Stats::Metric::name, "prefix.zone.from_az.to_az.upstream_rq_time"), 5));
   Http::CodeStatsImpl code_stats(*symbol_table_);
   code_stats.chargeResponseTiming(info);
-}
-
-class CodeStatsTest : public testing::Test {
-protected:
-  CodeStatsTest()
-      : symbol_table_(Stats::SymbolTableCreator::makeSymbolTable()), code_stats_(*symbol_table_) {}
-
-  absl::string_view stripTrailingDot(absl::string_view prefix) {
-    return CodeStatsImpl::stripTrailingDot(prefix);
-  }
-
-  Stats::SymbolTablePtr symbol_table_;
-  CodeStatsImpl code_stats_;
-};
-
-TEST_F(CodeStatsTest, StripTrailingDot) {
-  EXPECT_EQ("", stripTrailingDot(""));
-  EXPECT_EQ("foo", stripTrailingDot("foo."));
-  EXPECT_EQ(".foo", stripTrailingDot(".foo"));  // no change
-  EXPECT_EQ("foo.", stripTrailingDot("foo..")); // only one dot gets stripped.
 }
 
 } // namespace Http

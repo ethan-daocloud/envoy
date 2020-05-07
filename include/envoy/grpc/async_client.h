@@ -5,6 +5,7 @@
 #include "envoy/buffer/buffer.h"
 #include "envoy/common/pure.h"
 #include "envoy/grpc/status.h"
+#include "envoy/http/async_client.h"
 #include "envoy/http/header_map.h"
 #include "envoy/tracing/http_tracer.h"
 
@@ -57,6 +58,12 @@ public:
    * stream object and no further callbacks will be invoked.
    */
   virtual void resetStream() PURE;
+
+  /***
+   * @returns if the stream has enough buffered outbound data to be over the configured buffer
+   * limits
+   */
+  virtual bool isAboveWriteBufferHighWatermark() const PURE;
 };
 
 class RawAsyncRequestCallbacks {
@@ -67,7 +74,7 @@ public:
    * Called when populating the headers to send with initial metadata.
    * @param metadata initial metadata reference.
    */
-  virtual void onCreateInitialMetadata(Http::HeaderMap& metadata) PURE;
+  virtual void onCreateInitialMetadata(Http::RequestHeaderMap& metadata) PURE;
 
   /**
    * Called when the async gRPC request succeeds. No further callbacks will be invoked.
@@ -101,14 +108,14 @@ public:
    * Called when populating the headers to send with initial metadata.
    * @param metadata initial metadata reference.
    */
-  virtual void onCreateInitialMetadata(Http::HeaderMap& metadata) PURE;
+  virtual void onCreateInitialMetadata(Http::RequestHeaderMap& metadata) PURE;
 
   /**
    * Called when initial metadata is received. This will be called with empty metadata on a
    * trailers-only response, followed by onReceiveTrailingMetadata() with the trailing metadata.
    * @param metadata initial metadata reference.
    */
-  virtual void onReceiveInitialMetadata(Http::HeaderMapPtr&& metadata) PURE;
+  virtual void onReceiveInitialMetadata(Http::ResponseHeaderMapPtr&& metadata) PURE;
 
   /**
    * Called when an async gRPC message is received.
@@ -123,7 +130,7 @@ public:
    * stream termination.
    * @param metadata trailing metadata reference.
    */
-  virtual void onReceiveTrailingMetadata(Http::HeaderMapPtr&& metadata) PURE;
+  virtual void onReceiveTrailingMetadata(Http::ResponseTrailerMapPtr&& metadata) PURE;
 
   /**
    * Called when the remote closes or an error occurs on the gRPC stream. The stream is
@@ -150,7 +157,7 @@ public:
    * @param request serialized message.
    * @param callbacks the callbacks to be notified of RPC status.
    * @param parent_span the current parent tracing context.
-   * @param timeout supplies the request timeout.
+   * @param options the data struct to control the request sending.
    * @return a request handle or nullptr if no request could be started. NOTE: In this case
    *         onFailure() has already been called inline. The client owns the request and the
    *         handle should just be used to cancel.
@@ -158,7 +165,7 @@ public:
   virtual AsyncRequest* sendRaw(absl::string_view service_full_name, absl::string_view method_name,
                                 Buffer::InstancePtr&& request, RawAsyncRequestCallbacks& callbacks,
                                 Tracing::Span& parent_span,
-                                const absl::optional<std::chrono::milliseconds>& timeout) PURE;
+                                const Http::AsyncClient::RequestOptions& options) PURE;
 
   /**
    * Start a gRPC stream asynchronously.
@@ -166,6 +173,7 @@ public:
    * @param service_full_name full name of the service (i.e. service_method.service()->full_name()).
    * @param method_name name of the method (i.e. service_method.name()).
    * @param callbacks the callbacks to be notified of stream status.
+   * @param options the data struct to control the stream.
    * @return a stream handle or nullptr if no stream could be started. NOTE: In this case
    *         onRemoteClose() has already been called inline. The client owns the stream and
    *         the handle can be used to send more messages or finish the stream. It is expected that
@@ -174,7 +182,8 @@ public:
    */
   virtual RawAsyncStream* startRaw(absl::string_view service_full_name,
                                    absl::string_view method_name,
-                                   RawAsyncStreamCallbacks& callbacks) PURE;
+                                   RawAsyncStreamCallbacks& callbacks,
+                                   const Http::AsyncClient::StreamOptions& options) PURE;
 };
 
 using RawAsyncClientPtr = std::unique_ptr<RawAsyncClient>;

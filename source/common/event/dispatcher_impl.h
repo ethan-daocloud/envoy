@@ -30,8 +30,8 @@ class DispatcherImpl : Logger::Loggable<Logger::Id::main>,
                        public Dispatcher,
                        public FatalErrorHandlerInterface {
 public:
-  DispatcherImpl(Api::Api& api, Event::TimeSystem& time_system);
-  DispatcherImpl(Buffer::WatermarkFactoryPtr&& factory, Api::Api& api,
+  DispatcherImpl(const std::string& name, Api::Api& api, Event::TimeSystem& time_system);
+  DispatcherImpl(const std::string& name, Buffer::WatermarkFactoryPtr&& factory, Api::Api& api,
                  Event::TimeSystem& time_system);
   ~DispatcherImpl() override;
 
@@ -41,26 +41,27 @@ public:
   event_base& base() { return base_scheduler_.base(); }
 
   // Event::Dispatcher
+  const std::string& name() override { return name_; }
   TimeSource& timeSource() override { return api_.timeSource(); }
-  void initializeStats(Stats::Scope& scope, const std::string& prefix) override;
+  void initializeStats(Stats::Scope& scope, const absl::optional<std::string>& prefix) override;
   void clearDeferredDeleteList() override;
-  Network::ConnectionPtr
-  createServerConnection(Network::ConnectionSocketPtr&& socket,
-                         Network::TransportSocketPtr&& transport_socket) override;
+  Network::ConnectionPtr createServerConnection(Network::ConnectionSocketPtr&& socket,
+                                                Network::TransportSocketPtr&& transport_socket,
+                                                StreamInfo::StreamInfo& stream_info) override;
   Network::ClientConnectionPtr
   createClientConnection(Network::Address::InstanceConstSharedPtr address,
                          Network::Address::InstanceConstSharedPtr source_address,
                          Network::TransportSocketPtr&& transport_socket,
                          const Network::ConnectionSocket::OptionsSharedPtr& options) override;
-  Network::DnsResolverSharedPtr createDnsResolver(
-      const std::vector<Network::Address::InstanceConstSharedPtr>& resolvers) override;
-  FileEventPtr createFileEvent(int fd, FileReadyCb cb, FileTriggerType trigger,
+  Network::DnsResolverSharedPtr
+  createDnsResolver(const std::vector<Network::Address::InstanceConstSharedPtr>& resolvers,
+                    const bool use_tcp_for_dns_lookups) override;
+  FileEventPtr createFileEvent(os_fd_t fd, FileReadyCb cb, FileTriggerType trigger,
                                uint32_t events) override;
   Filesystem::WatcherPtr createFilesystemWatcher() override;
-  Network::ListenerPtr createListener(Network::Socket& socket, Network::ListenerCallbacks& cb,
-                                      bool bind_to_port,
-                                      bool hand_off_restored_destination_connections) override;
-  Network::UdpListenerPtr createUdpListener(Network::Socket& socket,
+  Network::ListenerPtr createListener(Network::SocketSharedPtr&& socket,
+                                      Network::ListenerCallbacks& cb, bool bind_to_port) override;
+  Network::UdpListenerPtr createUdpListener(Network::SocketSharedPtr&& socket,
                                             Network::UdpListenerCallbacks& cb) override;
   TimerPtr createTimer(TimerCb cb) override;
   void deferredDelete(DeferredDeletablePtr&& to_delete) override;
@@ -74,6 +75,8 @@ public:
     current_object_ = object;
     return return_object;
   }
+  MonotonicTime approximateMonotonicTime() const override;
+  void updateApproximateMonotonicTime() override;
 
   // FatalErrorInterface
   void onFatalError() const override {
@@ -88,6 +91,7 @@ public:
 
 private:
   TimerPtr createTimerInternal(TimerCb cb);
+  void updateApproximateMonotonicTimeInternal();
   void runPostCallbacks();
 
   // Validate that an operation is thread safe, i.e. it's invoked on the same thread that the
@@ -97,6 +101,7 @@ private:
     return run_tid_.isEmpty() || run_tid_ == api_.threadFactory().currentThreadId();
   }
 
+  const std::string name_;
   Api::Api& api_;
   std::string stats_prefix_;
   std::unique_ptr<DispatcherStats> stats_;
@@ -113,6 +118,7 @@ private:
   std::list<std::function<void()>> post_callbacks_ ABSL_GUARDED_BY(post_lock_);
   const ScopeTrackedObject* current_object_{};
   bool deferred_deleting_{};
+  MonotonicTime approximate_monotonic_time_;
 };
 
 } // namespace Event

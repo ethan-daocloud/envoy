@@ -1,12 +1,11 @@
 #include "extensions/filters/listener/tls_inspector/tls_inspector.h"
 
-#include <arpa/inet.h>
-
 #include <cstdint>
 #include <string>
 #include <vector>
 
 #include "envoy/common/exception.h"
+#include "envoy/common/platform.h"
 #include "envoy/event/dispatcher.h"
 #include "envoy/network/listen_socket.h"
 #include "envoy/stats/scope.h"
@@ -23,6 +22,10 @@ namespace Extensions {
 namespace ListenerFilters {
 namespace TlsInspector {
 
+// Min/max TLS version recognized by the underlying TLS/SSL library.
+const unsigned Config::TLS_MIN_SUPPORTED_VERSION = TLS1_VERSION;
+const unsigned Config::TLS_MAX_SUPPORTED_VERSION = TLS1_3_VERSION;
+
 Config::Config(Stats::Scope& scope, uint32_t max_client_hello_size)
     : stats_{ALL_TLS_INSPECTOR_STATS(POOL_COUNTER_PREFIX(scope, "tls_inspector."))},
       ssl_ctx_(SSL_CTX_new(TLS_with_buffers_method())),
@@ -33,6 +36,8 @@ Config::Config(Stats::Scope& scope, uint32_t max_client_hello_size)
                                      max_client_hello_size_, size_t(TLS_MAX_CLIENT_HELLO)));
   }
 
+  SSL_CTX_set_min_proto_version(ssl_ctx_.get(), TLS_MIN_SUPPORTED_VERSION);
+  SSL_CTX_set_max_proto_version(ssl_ctx_.get(), TLS_MAX_SUPPORTED_VERSION);
   SSL_CTX_set_options(ssl_ctx_.get(), SSL_OP_NO_TICKET);
   SSL_CTX_set_session_cache_mode(ssl_ctx_.get(), SSL_SESS_CACHE_OFF);
   SSL_CTX_set_select_certificate_cb(
@@ -49,7 +54,8 @@ Config::Config(Stats::Scope& scope, uint32_t max_client_hello_size)
   SSL_CTX_set_tlsext_servername_callback(
       ssl_ctx_.get(), [](SSL* ssl, int* out_alert, void*) -> int {
         Filter* filter = static_cast<Filter*>(SSL_get_app_data(ssl));
-        filter->onServername(SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name));
+        filter->onServername(
+            absl::NullSafeStringView(SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name)));
 
         // Return an error to stop the handshake; we have what we wanted already.
         *out_alert = SSL_AD_USER_CANCELLED;
@@ -112,7 +118,7 @@ Network::FilterStatus Filter::onAccept(Network::ListenerFilterCallbacks& cb) {
         Event::FileTriggerType::Edge, Event::FileReadyType::Read | Event::FileReadyType::Closed);
     return Network::FilterStatus::StopIteration;
   }
-  NOT_REACHED_GCOVR_EXCL_LINE
+  NOT_REACHED_GCOVR_EXCL_LINE;
 }
 
 void Filter::onALPN(const unsigned char* data, unsigned int len) {
@@ -151,10 +157,10 @@ ParseState Filter::onRead() {
   // there is no way for a listener-filter to pass payload data to the ConnectionImpl and filters
   // that get created later.
   //
-  // The file_event_ in this class gets events everytime new data is available on the socket,
+  // The file_event_ in this class gets events every time new data is available on the socket,
   // even if previous data has not been read, which is always the case due to MSG_PEEK. When
   // the TlsInspector completes and passes the socket along, a new FileEvent is created for the
-  // socket, so that new event is immediately signalled as readable because it is new and the socket
+  // socket, so that new event is immediately signaled as readable because it is new and the socket
   // is readable, even though no new events have occurred.
   //
   // TODO(ggreenway): write an integration test to ensure the events work as expected on all
@@ -220,7 +226,8 @@ ParseState Filter::parseClientHello(const void* data, size_t len) {
       } else {
         config_->stats().alpn_not_found_.inc();
       }
-      cb_->socket().setDetectedTransportProtocol(TransportSockets::TransportSocketNames::get().Tls);
+      cb_->socket().setDetectedTransportProtocol(
+          TransportSockets::TransportProtocolNames::get().Tls);
     } else {
       config_->stats().tls_not_found_.inc();
     }

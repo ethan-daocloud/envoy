@@ -4,20 +4,19 @@
 #include <functional>
 #include <memory>
 #include <string>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "envoy/config/metrics/v3/stats.pb.h"
 #include "envoy/stats/tag_extractor.h"
 #include "envoy/stats/tag_producer.h"
 
-#include "common/common/hash.h"
-#include "common/common/utility.h"
-#include "common/config/well_known_names.h"
-#include "common/protobuf/protobuf.h"
+#include "source/common/common/hash.h"
+#include "source/common/common/utility.h"
+#include "source/common/config/well_known_names.h"
+#include "source/common/protobuf/protobuf.h"
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/node_hash_set.h"
 #include "absl/strings/string_view.h"
 
 namespace Envoy {
@@ -29,7 +28,11 @@ namespace Stats {
  */
 class TagProducerImpl : public TagProducer {
 public:
+  TagProducerImpl(const envoy::config::metrics::v3::StatsConfig& config,
+                  const Stats::TagVector& cli_tags);
+
   TagProducerImpl(const envoy::config::metrics::v3::StatsConfig& config);
+
   TagProducerImpl() = default;
 
   /**
@@ -71,9 +74,9 @@ private:
    * into a string-set for dup-detection against new stat names
    * specified in the configuration.
    * @param config const envoy::config::metrics::v2::StatsConfig& the config.
-   * @return names std::unordered_set<std::string> the set of names to populate
+   * @return names absl::node_hash_set<std::string> the set of names to populate
    */
-  std::unordered_set<std::string>
+  absl::node_hash_set<std::string>
   addDefaultExtractors(const envoy::config::metrics::v3::StatsConfig& config);
 
   /**

@@ -1,10 +1,10 @@
 #include "test/extensions/filters/http/common/fuzz/uber_filter.h"
 
-#include "common/config/utility.h"
-#include "common/config/version_converter.h"
-#include "common/http/message_impl.h"
-#include "common/protobuf/protobuf.h"
-#include "common/protobuf/utility.h"
+#include "source/common/config/utility.h"
+#include "source/common/http/message_impl.h"
+#include "source/common/http/utility.h"
+#include "source/common/protobuf/protobuf.h"
+#include "source/common/protobuf/utility.h"
 
 #include "test/test_common/utility.h"
 
@@ -12,68 +12,52 @@ namespace Envoy {
 namespace Extensions {
 namespace HttpFilters {
 
-UberFilterFuzzer::UberFilterFuzzer() {
-  // Need to set for both a decoder filter and an encoder/decoder filter.
+UberFilterFuzzer::UberFilterFuzzer()
+    : async_request_{&cluster_manager_.thread_local_cluster_.async_client_} {
+  // This is a decoder filter.
   ON_CALL(filter_callback_, addStreamDecoderFilter(_))
-      .WillByDefault(Invoke([&](std::shared_ptr<Envoy::Http::StreamDecoderFilter> filter) -> void {
-        filter_ = filter;
-        filter_->setDecoderFilterCallbacks(callbacks_);
+      .WillByDefault(Invoke([&](Http::StreamDecoderFilterSharedPtr filter) -> void {
+        decoder_filter_ = filter;
+        decoder_filter_->setDecoderFilterCallbacks(decoder_callbacks_);
       }));
+  // This is an encoded filter.
+  ON_CALL(filter_callback_, addStreamEncoderFilter(_))
+      .WillByDefault(Invoke([&](Http::StreamEncoderFilterSharedPtr filter) -> void {
+        encoder_filter_ = filter;
+        encoder_filter_->setEncoderFilterCallbacks(encoder_callbacks_);
+      }));
+  // This is a decoder and encoder filter.
   ON_CALL(filter_callback_, addStreamFilter(_))
-      .WillByDefault(Invoke([&](std::shared_ptr<Envoy::Http::StreamDecoderFilter> filter) -> void {
-        filter_ = filter;
-        filter_->setDecoderFilterCallbacks(callbacks_);
+      .WillByDefault(Invoke([&](Http::StreamFilterSharedPtr filter) -> void {
+        decoder_filter_ = filter;
+        decoder_filter_->setDecoderFilterCallbacks(decoder_callbacks_);
+        encoder_filter_ = filter;
+        encoder_filter_->setEncoderFilterCallbacks(encoder_callbacks_);
       }));
+  // This filter supports access logging.
+  ON_CALL(filter_callback_, addAccessLogHandler(_))
+      .WillByDefault(
+          Invoke([&](AccessLog::InstanceSharedPtr handler) -> void { access_logger_ = handler; }));
+  // This handles stopping execution after a direct response is sent.
+  ON_CALL(decoder_callbacks_, sendLocalReply(_, _, _, _, _))
+      .WillByDefault(
+          Invoke([this](Http::Code code, absl::string_view body,
+                        std::function<void(Http::ResponseHeaderMap & headers)> modify_headers,
+                        const absl::optional<Grpc::Status::GrpcStatus> grpc_status,
+                        absl::string_view details) {
+            enabled_ = false;
+            decoder_callbacks_.sendLocalReply_(code, body, modify_headers, grpc_status, details);
+          }));
+  ON_CALL(encoder_callbacks_, addEncodedTrailers())
+      .WillByDefault(testing::ReturnRef(encoded_trailers_));
   // Set expectations for particular filters that may get fuzzed.
   perFilterSetup();
-}
-
-void UberFilterFuzzer::decode(Http::StreamDecoderFilter* filter, const test::fuzz::HttpData& data) {
-  bool end_stream = false;
-
-  auto headers = Fuzz::fromHeaders<Http::TestRequestHeaderMapImpl>(data.headers());
-  if (headers.Path() == nullptr) {
-    headers.setPath("/foo");
-  }
-  if (headers.Method() == nullptr) {
-    headers.setMethod("GET");
-  }
-  if (headers.Host() == nullptr) {
-    headers.setHost("foo.com");
-  }
-
-  if (data.data().empty() && !data.has_trailers()) {
-    end_stream = true;
-  }
-  ENVOY_LOG_MISC(debug, "Decoding headers: {} ", data.headers().DebugString());
-  const auto& headersStatus = filter->decodeHeaders(headers, end_stream);
-  if (headersStatus != Http::FilterHeadersStatus::Continue &&
-      headersStatus != Http::FilterHeadersStatus::StopIteration) {
-    return;
-  }
-
-  for (int i = 0; i < data.data().size(); i++) {
-    if (i == data.data().size() - 1 && !data.has_trailers()) {
-      end_stream = true;
-    }
-    Buffer::OwnedImpl buffer(data.data().Get(i));
-    ENVOY_LOG_MISC(debug, "Decoding data: {} ", buffer.toString());
-    if (filter->decodeData(buffer, end_stream) != Http::FilterDataStatus::Continue) {
-      return;
-    }
-  }
-
-  if (data.has_trailers()) {
-    ENVOY_LOG_MISC(debug, "Decoding trailers: {} ", data.trailers().DebugString());
-    auto trailers = Fuzz::fromHeaders<Http::TestRequestTrailerMapImpl>(data.trailers());
-    filter->decodeTrailers(trailers);
-  }
 }
 
 void UberFilterFuzzer::fuzz(
     const envoy::extensions::filters::network::http_connection_manager::v3::HttpFilter&
         proto_config,
-    const test::fuzz::HttpData& data) {
+    const test::fuzz::HttpData& downstream_data, const test::fuzz::HttpData& upstream_data) {
   try {
     // Try to create the filter. Exit early if the config is invalid or violates PGV constraints.
     ENVOY_LOG_MISC(info, "filter name {}", proto_config.name());
@@ -81,7 +65,7 @@ void UberFilterFuzzer::fuzz(
         Server::Configuration::NamedHttpFilterConfigFactory>(proto_config.name());
     ProtobufTypes::MessagePtr message = Config::Utility::translateToFactoryConfig(
         proto_config, factory_context_.messageValidationVisitor(), factory);
-    // Clean-up config with filter-specific logic.
+    // Clean-up config with filter-specific logic before it runs through validations.
     cleanFuzzedConfig(proto_config.name(), message.get());
     cb_ = factory.createFilterFactoryFromProto(*message, "stats", factory_context_);
     cb_(filter_callback_);
@@ -90,15 +74,33 @@ void UberFilterFuzzer::fuzz(
     return;
   }
 
-  decode(filter_.get(), data);
+  // Data path should not throw exceptions.
+  if (decoder_filter_ != nullptr) {
+    HttpFilterFuzzer::runData(decoder_filter_.get(), downstream_data);
+  }
+  if (encoder_filter_ != nullptr) {
+    HttpFilterFuzzer::runData(encoder_filter_.get(), upstream_data);
+  }
+  if (access_logger_ != nullptr) {
+    HttpFilterFuzzer::accessLog(access_logger_.get(), stream_info_);
+  }
+
   reset();
 }
 
 void UberFilterFuzzer::reset() {
-  if (filter_ != nullptr) {
-    filter_->onDestroy();
+  if (decoder_filter_ != nullptr) {
+    decoder_filter_->onDestroy();
   }
-  filter_.reset();
+  decoder_filter_.reset();
+
+  if (encoder_filter_ != nullptr) {
+    encoder_filter_->onDestroy();
+  }
+  encoder_filter_.reset();
+
+  access_logger_.reset();
+  HttpFilterFuzzer::reset();
 }
 
 } // namespace HttpFilters

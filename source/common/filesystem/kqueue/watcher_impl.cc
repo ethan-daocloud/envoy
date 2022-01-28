@@ -6,10 +6,10 @@
 #include "envoy/event/dispatcher.h"
 #include "envoy/event/file_event.h"
 
-#include "common/common/assert.h"
-#include "common/common/fmt.h"
-#include "common/common/utility.h"
-#include "common/filesystem/watcher_impl.h"
+#include "source/common/common/assert.h"
+#include "source/common/common/fmt.h"
+#include "source/common/common/utility.h"
+#include "source/common/filesystem/watcher_impl.h"
 
 #include "event2/event.h"
 
@@ -72,7 +72,7 @@ WatcherImpl::FileWatchPtr WatcherImpl::addWatch(absl::string_view path, uint32_t
 
   if (kevent(queue_, &event, 1, nullptr, 0, nullptr) == -1 || event.flags & EV_ERROR) {
     throw EnvoyException(
-        fmt::format("unable to add filesystem watch for file {}: {}", path, strerror(errno)));
+        fmt::format("unable to add filesystem watch for file {}: {}", path, errorDetails(errno)));
   }
 
   ENVOY_LOG(debug, "added watch for file: '{}' fd: {}", path, watch_fd);

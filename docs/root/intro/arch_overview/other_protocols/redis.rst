@@ -8,8 +8,8 @@ In this mode, the goals of Envoy are to maintain availability and partition tole
 over consistency. This is the key point when comparing Envoy to `Redis Cluster
 <https://redis.io/topics/cluster-spec>`_. Envoy is designed as a best-effort cache,
 meaning that it will not try to reconcile inconsistent data or keep a globally consistent
-view of cluster membership. It also supports routing commands from different workload to
-different to different upstream clusters based on their access patterns, eviction, or isolation
+view of cluster membership. It also supports routing commands from different workloads to
+different upstream clusters based on their access patterns, eviction, or isolation
 requirements.
 
 The Redis project offers a thorough reference on partitioning as it relates to Redis. See
@@ -62,10 +62,10 @@ close map to 5xx. All other responses from Redis are counted as a success.
 
 .. _arch_overview_redis_cluster_support:
 
-Redis Cluster Support (Experimental)
-----------------------------------------
+Redis Cluster Support
+---------------------
 
-Envoy currently offers experimental support for `Redis Cluster <https://redis.io/topics/cluster-spec>`_.
+Envoy offers support for `Redis Cluster <https://redis.io/topics/cluster-spec>`_.
 
 When using Envoy as a sidecar proxy for a Redis Cluster, the service can use a non-cluster Redis client
 implemented in any language to connect to the proxy as if it's a single node Redis instance.
@@ -78,11 +78,11 @@ Envoy proxy tracks the topology of the cluster by sending periodic
 following information:
 
 * List of known nodes.
-* The masters for each shard.
+* The primaries for each shard.
 * Nodes entering or leaving the cluster.
 
 For topology configuration details, see the Redis Cluster
-:ref:`v2 API reference <envoy_v3_api_msg_extensions.clusters.redis.v3.RedisClusterConfig>`.
+:ref:`v3 API reference <envoy_v3_api_msg_extensions.clusters.redis.v3.RedisClusterConfig>`.
 
 Every Redis cluster has its own extra statistics tree rooted at *cluster.<name>.redis_cluster.* with the following statistics:
 
@@ -96,7 +96,7 @@ Every Redis cluster has its own extra statistics tree rooted at *cluster.<name>.
 
 .. _arch_overview_redis_cluster_command_stats:
 
-Per-cluster command statistics can be enabled via the setting :ref:`enable_command_stats <envoy_v3_api_field_extensions.filters.network.redis_proxy.v3.RedisProxy.ConnPoolSettings.enable_command_stats>`:
+Per-cluster command statistics can be enabled via the setting :ref:`enable_command_stats <envoy_v3_api_field_extensions.filters.network.redis_proxy.v3.RedisProxy.ConnPoolSettings.enable_command_stats>`.:
 
 .. csv-table::
   :header: Name, Type, Description
@@ -106,7 +106,7 @@ Per-cluster command statistics can be enabled via the setting :ref:`enable_comma
   upstream_commands.[command].failure, Counter, Total number of failed or cancelled requests for a specific Redis command
   upstream_commands.[command].total, Counter, Total number of requests for a specific Redis command (sum of success and failure)
   upstream_commands.[command].latency, Histogram, Latency of requests for a specific Redis command
-  
+
 Supported commands
 ------------------
 

@@ -10,7 +10,7 @@ routing PRs, questions, etc. to the right place.
   * Catch-all, "all the things", and generally trying to make himself obsolete as fast as
     possible.
 * Harvey Tuch ([htuch](https://github.com/htuch)) (htuch@google.com)
-  * APIs, xDS, UDPA, gRPC, configuration, security, Python, and Bash.
+  * xDS APIs, configuration and control plane.
 * Alyssa Wilk ([alyssawilk](https://github.com/alyssawilk)) (alyssar@google.com)
   * HTTP, flow control, cluster manager, load balancing, and core networking (listeners,
     connections, etc.).
@@ -27,23 +27,57 @@ routing PRs, questions, etc. to the right place.
 
 # Maintainers
 
-* Asra Ali ([asraa](https://github.com/asraa)) (asraa@google.com)
-  * Fuzzing, security, headers, HTTP/gRPC, router, access log, tests.
 * Yan Avlasov ([yanavlasov](https://github.com/yanavlasov)) (yavlasov@google.com)
   * Data plane, codecs, security, configuration.
 * Jose Nino ([junr03](https://github.com/junr03)) (jnino@lyft.com)
   * Outlier detection, HTTP routing, xDS, configuration/operational questions.
-* Dhi Aurrahman ([dio](https://github.com/dio)) (dio@tetrate.io)
+* Dhi Aurrahman ([dio](https://github.com/dio)) (dio@rockybars.com)
   * Lua, access logging, and general miscellany.
 * Joshua Marantz ([jmarantz](https://github.com/jmarantz)) (jmarantz@google.com)
   * Stats, abseil, scalability, and performance.
+* Ryan Northey ([phlax](https://github.com/phlax)) (ryan@synca.io)
+  * Docs, tooling, CI, containers and sandbox examples
+* William A Rowe Jr ([wrowe](https://github.com/wrowe)) (wrowe@vmware.com)
+  * Windows port and CI build, `bazel/foreign_cc` build and dependencies liaison.
+* Antonio Vicente ([antoniovicente](https://github.com/antoniovicente)) (avd@google.com)
+  * Event management, security, performance, data plane.
+* Dmitry Rozhkov ([rojkov](https://github.com/rojkov)) (dmitry.rozhkov@intel.com)
+  * Scalability and performance.
+* Ryan Hamilton ([RyanTheOptimist](https://github.com/ryantheoptimist)) (rch@google.com)
+  * HTTP/3, upstream connection management.
+* Adi Peleg ([adisuissa](https://github.com/adisuissa)) (adip@google.com)
+  * xDS APIs, configuration, control plane, fuzzing.
+* Kevin Baichoo ([KBaichoo](https://github.com/KBaichoo)) (kbaichoo@google.com)
+  * Data plane, overload management, flow control.
+
+
+# Senior extension maintainers
+
+The following extension maintainers have final say over the extensions mentioned below. Once they
+approve an extension PR, it will be merged by the maintainer on-call (or any other maintainer)
+without further review.
+
+* Piotr Sikora ([PiotrSikora](https://github.com/PiotrSikora)) (piotrsikora@google.com)
+  * Wasm
+* Raúl Gutiérrez Segalés ([rgs1](https://github.com/rgs1)) (rgs@pinterest.com)
+  * Thrift
 
 # Envoy security team
 
-* All maintainers
-* Piotr Sikora ([PiotrSikora](https://github.com/PiotrSikora)) (piotrsikora@google.com)
-* Antonio Vicente ([antoniovicente](https://github.com/antoniovicente)) (avd@google.com)
-* Tony Allen ([tonya11en](https://github.com/tonya11en)) (tallen@lyft.com)
+* All senior maintainers
+* Tony Allen ([tonya11en](https://github.com/tonya11en)) (tony@allen.gg)
+* Yan Avlasov ([yanavlasov](https://github.com/yanavlasov)) (yavlasov@google.com)
+* William A Rowe Jr ([wrowe](https://github.com/wrowe)) (wrowe@vmware.com)
+* Otto van der Schaaf ([oschaaf](https://github.com/oschaaf)) (oschaaf@redhat.com)
+* Tim Walsh ([twghu](https://github.com/twghu)) (walsh@redhat.com)
+
+In addition to the permanent Envoy security team, we have additional temporary
+contributors to envoy-setec and relevant Slack channels from:
+
+* [Trail of Bits](https://www.trailofbits.com/) expiring 9/30/2022.
+  * Adam Meily ([ameily](https://github.com/ameily))
+  * Alessandro Gario ([alessandrogario](https://github.com/alessandrogario))
+  * Mike Myers ([mike-myers-tob](https://github.com/mike-myers-tob))
 
 # Emeritus maintainers
 
@@ -51,19 +85,15 @@ routing PRs, questions, etc. to the right place.
 * Roman Dzhabarov ([RomanDzhabarov](https://github.com/RomanDzhabarov)) (rdzhabarov@lyft.com)
 * Bill Gallagher ([wgallagher](https://github.com/wgallagher)) (bgallagher@lyft.com)
 * Dan Noé ([dnoe](https://github.com/dnoe)) (dpn@google.com)
+* Sotiris Nanopoulos ([davinci26](https://github.com/davinci26)) (Sotiris.Nanopoulos@microsoft.com)
+* Asra Ali ([asraa](https://github.com/asraa)) (asraa@google.com)
 
 # Friends of Envoy
 
 This section lists a few people that are not maintainers but typically help out with subject
 matter expert reviews. Feel free to loop them in as needed.
 
-* Piotr Sikora ([PiotrSikora](https://github.com/PiotrSikora)) (piotrsikora@google.com)
-  * TLS, BoringSSL, and core networking (listeners, connections, etc.).
-* Shriram Rajagopalan ([rshriram](https://github.com/rshriram)) (shriram@us.ibm.com)
-  * Istio, APIs, HTTP routing, and WebSocket.
-* John Millikin ([jmillikin-stripe](https://github.com/jmillikin-stripe)) (jmillikin@stripe.com)
-  * Bazel/build.
-* Daniel Hochman ([danielhochman](https://github.com/danielhochman)) (dhochman@lyft.com)
-  * Redis, Python, configuration/operational questions.
 * Yuchen Dai ([lambdai](https://github.com/lambdai)) (lambdai@google.com)
   * v2 xDS, listeners, filter chain discovery service.
+* Michael Payne ([moderation](https://github.com/moderation)) (m@m17e.org)
+  * External dependencies, Envoy's supply chain and documentation.

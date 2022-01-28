@@ -9,10 +9,11 @@
 #include "envoy/config/route/v3/route.pb.h"
 #include "envoy/http/header_map.h"
 
-#include "common/common/fmt.h"
-#include "common/config/api_version.h"
-#include "common/profiler/profiler.h"
-#include "common/stats/stats_matcher_impl.h"
+#include "source/common/common/fmt.h"
+#include "source/common/config/api_version.h"
+#include "source/common/profiler/profiler.h"
+#include "source/common/stats/histogram_impl.h"
+#include "source/common/stats/stats_matcher_impl.h"
 
 #include "test/common/stats/stat_test_utility.h"
 #include "test/integration/utility.h"
@@ -29,51 +30,9 @@ namespace Envoy {
 
 INSTANTIATE_TEST_SUITE_P(Protocols, IntegrationAdminTest,
                          testing::ValuesIn(HttpProtocolIntegrationTest::getProtocolTestParams(
-                             {Http::CodecClient::Type::HTTP1, Http::CodecClient::Type::HTTP2},
-                             {FakeHttpConnection::Type::HTTP1})),
+                             {Http::CodecType::HTTP1, Http::CodecType::HTTP2},
+                             {Http::CodecType::HTTP1})),
                          HttpProtocolIntegrationTest::protocolTestParamsToString);
-
-TEST_P(IntegrationAdminTest, HealthCheck) {
-  initialize();
-
-  BufferingStreamDecoderPtr response;
-  EXPECT_EQ("200", request("http", "POST", "/healthcheck", response));
-
-  EXPECT_EQ("200", request("admin", "POST", "/healthcheck/fail", response));
-  EXPECT_EQ("503", request("http", "GET", "/healthcheck", response));
-
-  EXPECT_EQ("200", request("admin", "POST", "/healthcheck/ok", response));
-  EXPECT_EQ("200", request("http", "GET", "/healthcheck", response));
-}
-
-TEST_P(IntegrationAdminTest, HealthCheckWithoutServerStats) {
-  envoy::config::metrics::v3::StatsMatcher stats_matcher;
-  stats_matcher.mutable_exclusion_list()->add_patterns()->set_prefix("server.");
-  initialize(stats_matcher);
-
-  BufferingStreamDecoderPtr response;
-  EXPECT_EQ("200", request("http", "POST", "/healthcheck", response));
-  EXPECT_EQ("200", request("admin", "GET", "/stats", response));
-  EXPECT_THAT(response->body(), Not(HasSubstr("server.")));
-
-  EXPECT_EQ("200", request("admin", "POST", "/healthcheck/fail", response));
-  EXPECT_EQ("503", request("http", "GET", "/healthcheck", response));
-  EXPECT_EQ("200", request("admin", "GET", "/stats", response));
-  EXPECT_THAT(response->body(), Not(HasSubstr("server.")));
-
-  EXPECT_EQ("200", request("admin", "POST", "/healthcheck/ok", response));
-  EXPECT_EQ("200", request("http", "GET", "/healthcheck", response));
-  EXPECT_EQ("200", request("admin", "GET", "/stats", response));
-  EXPECT_THAT(response->body(), Not(HasSubstr("server.")));
-}
-
-TEST_P(IntegrationAdminTest, HealthCheckWithBufferFilter) {
-  config_helper_.addFilter(ConfigHelper::defaultBufferFilter());
-  initialize();
-
-  BufferingStreamDecoderPtr response;
-  EXPECT_EQ("200", request("http", "GET", "/healthcheck", response));
-}
 
 TEST_P(IntegrationAdminTest, AdminLogging) {
   initialize();
@@ -117,8 +76,6 @@ std::string ContentType(const BufferingStreamDecoderPtr& response) {
 } // namespace
 
 TEST_P(IntegrationAdminTest, Admin) {
-  Stats::TestUtil::SymbolTableCreatorTestPeer symbol_table_creator_test_peer;
-  symbol_table_creator_test_peer.setUseFakeSymbolTables(false);
   initialize();
 
   BufferingStreamDecoderPtr response;
@@ -156,7 +113,7 @@ TEST_P(IntegrationAdminTest, Admin) {
   EXPECT_EQ("200", request("admin", "GET", "/stats/recentlookups", response));
   EXPECT_EQ("text/plain; charset=UTF-8", ContentType(response));
   EXPECT_TRUE(absl::StartsWith(response->body(), "   Count Lookup\n")) << response->body();
-  EXPECT_LT(30, response->body().size());
+  EXPECT_LT(28, response->body().size());
 
   // Now disable recent-lookups tracking and check that we get the error again.
   EXPECT_EQ("200", request("admin", "POST", "/stats/recentlookups/disable", response));
@@ -226,6 +183,24 @@ TEST_P(IntegrationAdminTest, Admin) {
   EXPECT_THAT(response->body(),
               HasSubstr("envoy_cluster_upstream_cx_active{envoy_cluster_name=\"cluster_0\"} 0\n"));
 
+  // Test that a specific bucket config is applied. Buckets 1-4 (inclusive) are set in initialize().
+  for (int i = 1; i <= 4; i++) {
+    EXPECT_THAT(
+        response->body(),
+        HasSubstr(fmt::format("envoy_cluster_upstream_cx_connect_ms_bucket{{envoy_cluster_name="
+                              "\"cluster_0\",le=\"{}\"}} 0\n",
+                              i)));
+  }
+
+  // Test that other histograms use the default buckets.
+  for (double bucket : Stats::HistogramSettingsImpl::defaultBuckets()) {
+    EXPECT_THAT(
+        response->body(),
+        HasSubstr(fmt::format("envoy_cluster_upstream_cx_length_ms_bucket{{envoy_cluster_name="
+                              "\"cluster_0\",le=\"{0:.32g}\"}} 0\n",
+                              bucket)));
+  }
+
   EXPECT_EQ("200", request("admin", "GET", "/stats/prometheus", response));
   EXPECT_THAT(
       response->body(),
@@ -262,41 +237,21 @@ TEST_P(IntegrationAdminTest, Admin) {
   EXPECT_EQ("200", request("admin", "GET", "/stats/recentlookups", response));
   EXPECT_EQ("text/plain; charset=UTF-8", ContentType(response));
 
-  // TODO(#8324): "http1.metadata_not_supported_error" should not still be in
-  // the 'recent lookups' output after reset_counters.
   switch (GetParam().downstream_protocol) {
-  case Http::CodecClient::Type::HTTP1:
+  case Http::CodecType::HTTP1:
     EXPECT_EQ("   Count Lookup\n"
-              "       1 http1.dropped_headers_with_underscores\n"
-              "       1 http1.metadata_not_supported_error\n"
-              "       1 http1.requests_rejected_with_underscores_in_headers\n"
-              "       1 http1.response_flood\n"
               "\n"
-              "total: 4\n",
+              "total: 0\n",
               response->body());
     break;
-  case Http::CodecClient::Type::HTTP2:
+  case Http::CodecType::HTTP2:
     EXPECT_EQ("   Count Lookup\n"
-              "       1 http2.dropped_headers_with_underscores\n"
-              "       1 http2.header_overflow\n"
-              "       1 http2.headers_cb_no_stream\n"
-              "       1 http2.inbound_empty_frames_flood\n"
-              "       1 http2.inbound_priority_frames_flood\n"
-              "       1 http2.inbound_window_update_frames_flood\n"
-              "       1 http2.outbound_control_flood\n"
-              "       1 http2.outbound_flood\n"
-              "       1 http2.requests_rejected_with_underscores_in_headers\n"
-              "       1 http2.rx_messaging_error\n"
-              "       1 http2.rx_reset\n"
-              "       1 http2.too_many_header_frames\n"
-              "       1 http2.trailers\n"
-              "       1 http2.tx_reset\n"
               "\n"
-              "total: 14\n",
+              "total: 0\n",
               response->body());
     break;
-  case Http::CodecClient::Type::HTTP3:
-    NOT_IMPLEMENTED_GCOVR_EXCL_LINE;
+  case Http::CodecType::HTTP3:
+    PANIC("not implemented");
   }
 
   EXPECT_EQ("200", request("admin", "GET", "/certs", response));
@@ -378,12 +333,46 @@ TEST_P(IntegrationAdminTest, Admin) {
   config_dump.configs(5).UnpackTo(&secret_config_dump);
   EXPECT_EQ("secret_static_0", secret_config_dump.static_secrets(0).name());
 
+  EXPECT_EQ("200", request("admin", "GET", "/config_dump?include_eds", response));
+  EXPECT_EQ("application/json", ContentType(response));
+  json = Json::Factory::loadFromString(response->body());
+  index = 0;
+  const std::string expected_types_eds[] = {
+      "type.googleapis.com/envoy.admin.v3.BootstrapConfigDump",
+      "type.googleapis.com/envoy.admin.v3.ClustersConfigDump",
+      "type.googleapis.com/envoy.admin.v3.EndpointsConfigDump",
+      "type.googleapis.com/envoy.admin.v3.ListenersConfigDump",
+      "type.googleapis.com/envoy.admin.v3.ScopedRoutesConfigDump",
+      "type.googleapis.com/envoy.admin.v3.RoutesConfigDump",
+      "type.googleapis.com/envoy.admin.v3.SecretsConfigDump"};
+
+  for (const Json::ObjectSharedPtr& obj_ptr : json->getObjectArray("configs")) {
+    EXPECT_TRUE(expected_types_eds[index].compare(obj_ptr->getString("@type")) == 0);
+    index++;
+  }
+
+  // Validate we can parse as proto.
+  envoy::admin::v3::ConfigDump config_dump_with_eds;
+  TestUtility::loadFromJson(response->body(), config_dump_with_eds);
+  EXPECT_EQ(7, config_dump_with_eds.configs_size());
+
+  EXPECT_EQ("200", request("admin", "GET", "/config_dump?name_regex=route_config_0", response));
+  EXPECT_EQ("application/json", ContentType(response));
+  envoy::admin::v3::ConfigDump name_filtered_config_dump;
+  TestUtility::loadFromJson(response->body(), name_filtered_config_dump);
+  EXPECT_EQ(6, config_dump.configs_size());
+
+  // SecretsConfigDump should have been totally filtered away.
+  secret_config_dump.Clear();
+  name_filtered_config_dump.configs(5).UnpackTo(&secret_config_dump);
+  EXPECT_EQ(secret_config_dump.static_secrets().size(), 0);
+
   // Validate that the "inboundonly" does not stop the default listener.
   response = IntegrationUtil::makeSingleRequest(lookupPort("admin"), "POST",
                                                 "/drain_listeners?inboundonly", "",
                                                 downstreamProtocol(), version_);
   EXPECT_TRUE(response->complete());
-  EXPECT_EQ("200", response->headers().Status()->value().getStringView());
+  EXPECT_EQ("200", response->headers().getStatusValue());
   EXPECT_EQ("text/plain; charset=UTF-8", ContentType(response));
   EXPECT_EQ("OK\n", response->body());
 
@@ -395,7 +384,7 @@ TEST_P(IntegrationAdminTest, Admin) {
   response = IntegrationUtil::makeSingleRequest(lookupPort("admin"), "POST", "/drain_listeners", "",
                                                 downstreamProtocol(), version_);
   EXPECT_TRUE(response->complete());
-  EXPECT_EQ("200", response->headers().Status()->value().getStringView());
+  EXPECT_EQ("200", response->headers().getStatusValue());
   EXPECT_EQ("text/plain; charset=UTF-8", ContentType(response));
   EXPECT_EQ("OK\n", response->body());
 
@@ -415,7 +404,7 @@ TEST_P(IntegrationAdminTest, AdminDrainInboundOnly) {
       lookupPort("admin"), "POST", "/drain_listeners?inboundonly", "", downstreamProtocol(),
       version_);
   EXPECT_TRUE(response->complete());
-  EXPECT_EQ("200", response->headers().Status()->value().getStringView());
+  EXPECT_EQ("200", response->headers().getStatusValue());
   EXPECT_EQ("text/plain; charset=UTF-8", ContentType(response));
   EXPECT_EQ("OK\n", response->body());
 
@@ -446,8 +435,8 @@ TEST_P(IntegrationAdminTest, AdminOnDestroyCallbacks) {
   // Check that the added callback was invoked.
   EXPECT_EQ(test, false);
 
-  // Small test to cover new statsFlushInterval() on Instance.h.
-  EXPECT_EQ(test_server_->server().statsFlushInterval(), std::chrono::milliseconds(5000));
+  // Small test to cover new the flush interval on the statsConfig in Instance.h.
+  EXPECT_EQ(test_server_->server().statsConfig().flushInterval(), std::chrono::milliseconds(5000));
 }
 
 TEST_P(IntegrationAdminTest, AdminCpuProfilerStart) {
@@ -470,7 +459,7 @@ TEST_P(IntegrationAdminTest, AdminCpuProfilerStart) {
 class IntegrationAdminIpv4Ipv6Test : public testing::Test, public HttpIntegrationTest {
 public:
   IntegrationAdminIpv4Ipv6Test()
-      : HttpIntegrationTest(Http::CodecClient::Type::HTTP1, Network::Address::IpVersion::v4) {}
+      : HttpIntegrationTest(Http::CodecType::HTTP1, Network::Address::IpVersion::v4) {}
 
   void initialize() override {
     config_helper_.addConfigModifier(
@@ -493,7 +482,7 @@ TEST_F(IntegrationAdminIpv4Ipv6Test, Ipv4Ipv6Listen) {
     BufferingStreamDecoderPtr response = IntegrationUtil::makeSingleRequest(
         lookupPort("admin"), "GET", "/server_info", "", downstreamProtocol(), version_);
     EXPECT_TRUE(response->complete());
-    EXPECT_EQ("200", response->headers().Status()->value().getStringView());
+    EXPECT_EQ("200", response->headers().getStatusValue());
   }
 }
 
@@ -510,7 +499,7 @@ class StatsMatcherIntegrationTest
       public HttpIntegrationTest,
       public testing::WithParamInterface<Network::Address::IpVersion> {
 public:
-  StatsMatcherIntegrationTest() : HttpIntegrationTest(Http::CodecClient::Type::HTTP1, GetParam()) {}
+  StatsMatcherIntegrationTest() : HttpIntegrationTest(Http::CodecType::HTTP1, GetParam()) {}
 
   void initialize() override {
     config_helper_.addConfigModifier(
@@ -523,7 +512,7 @@ public:
     response_ = IntegrationUtil::makeSingleRequest(lookupPort("admin"), "GET", "/stats", "",
                                                    downstreamProtocol(), version_);
     ASSERT_TRUE(response_->complete());
-    EXPECT_EQ("200", response_->headers().Status()->value().getStringView());
+    EXPECT_EQ("200", response_->headers().getStatusValue());
   }
 
   BufferingStreamDecoderPtr response_;
@@ -541,9 +530,9 @@ TEST_P(StatsMatcherIntegrationTest, ExcludePrefixServerDot) {
   EXPECT_THAT(response_->body(), Not(HasSubstr("server.")));
 }
 
-TEST_P(StatsMatcherIntegrationTest, DEPRECATED_FEATURE_TEST(ExcludeRequests)) {
-  stats_matcher_.mutable_exclusion_list()->add_patterns()->set_hidden_envoy_deprecated_regex(
-      ".*requests.*");
+TEST_P(StatsMatcherIntegrationTest, DEPRECATED_FEATURE_TEST(DISABLED_ExcludeRequests)) {
+  stats_matcher_.mutable_exclusion_list()->add_patterns()->MergeFrom(
+      TestUtility::createRegexMatcher(".*requests.*"));
   initialize();
   makeRequest();
   EXPECT_THAT(response_->body(), Not(HasSubstr("requests")));
@@ -556,10 +545,10 @@ TEST_P(StatsMatcherIntegrationTest, DEPRECATED_FEATURE_TEST(ExcludeExact)) {
   EXPECT_THAT(response_->body(), Not(HasSubstr("server.concurrency")));
 }
 
-TEST_P(StatsMatcherIntegrationTest, DEPRECATED_FEATURE_TEST(ExcludeMultipleExact)) {
+TEST_P(StatsMatcherIntegrationTest, DEPRECATED_FEATURE_TEST(DISABLED_ExcludeMultipleExact)) {
   stats_matcher_.mutable_exclusion_list()->add_patterns()->set_exact("server.concurrency");
-  stats_matcher_.mutable_exclusion_list()->add_patterns()->set_hidden_envoy_deprecated_regex(
-      ".*live");
+  stats_matcher_.mutable_exclusion_list()->add_patterns()->MergeFrom(
+      TestUtility::createRegexMatcher(".*live"));
   initialize();
   makeRequest();
   EXPECT_THAT(response_->body(), Not(HasSubstr("server.concurrency")));

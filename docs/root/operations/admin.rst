@@ -24,7 +24,6 @@ modify different aspects of the server:
   .. code-block:: yaml
 
     admin:
-      access_log_path: /tmp/admin_access.log
       profile_path: /tmp/envoy.prof
       address:
         socket_address: { address: 127.0.0.1, port_value: 9901 }
@@ -34,6 +33,33 @@ modify different aspects of the server:
 
   All mutations must be sent as HTTP POST operations. When a mutation is requested via GET,
   the request has no effect, and an HTTP 400 (Invalid Request) response is returned.
+
+.. note::
+
+  For an endpoint with *?format=json*, it dumps data as a JSON-serialized proto. Fields with default
+  values are not rendered. For example for */clusters?format=json*, the circuit breakers thresholds
+  priority field is omitted when its value is :ref:`DEFAULT priority
+  <envoy_v3_api_enum_value_config.core.v3.RoutingPriority.DEFAULT>` as shown below:
+
+  .. code-block:: json
+
+    {
+     "thresholds": [
+      {
+       "max_connections": 1,
+       "max_pending_requests": 1024,
+       "max_requests": 1024,
+       "max_retries": 1
+      },
+      {
+       "priority": "HIGH",
+       "max_connections": 1,
+       "max_pending_requests": 1024,
+       "max_requests": 1024,
+       "max_retries": 1
+      }
+     ]
+    }
 
 .. http:get:: /
 
@@ -137,6 +163,13 @@ modify different aspects of the server:
   The underlying proto is marked v2alpha and hence its contents, including the JSON representation,
   are not guaranteed to be stable.
 
+.. _operations_admin_interface_config_dump_include_eds:
+
+.. http:get:: /config_dump?include_eds
+
+  Dump currently loaded configuration including EDS. See the :ref:`response definition <envoy_v3_api_msg_admin.v3.EndpointsConfigDump>` for more
+  information.
+
 .. _operations_admin_interface_config_dump_by_mask:
 
 .. http:get:: /config_dump?mask={}
@@ -160,6 +193,25 @@ modify different aspects of the server:
   :ref:`ClustersConfigDump <envoy_v3_api_msg_admin.v3.ClustersConfigDump>`. If you need a non-repeated
   field, use the mask query parameter documented above. If you want only a subset of fields from the repeated
   resource, use both as documented below.
+
+.. _operations_admin_interface_config_dump_by_name_regex:
+
+.. http:get:: /config_dump?name_regex={}
+
+  Dump only the currently loaded configurations whose names match the specified regex. Can be used with
+  both `resource` and `mask` query parameters.
+
+  For example, ``/config_dump?name_regex=.*substring.*`` would return all resource types
+  whose name field matches the given regex.
+
+  Per resource, the matched name field is:
+
+  - :ref:`envoy.config.listener.v3.Listener.name <envoy_v3_api_field_config.listener.v3.Listener.name>`
+  - :ref:`envoy.config.route.v3.RouteConfiguration.name <envoy_v3_api_field_config.route.v3.RouteConfiguration.name>`
+  - :ref:`envoy.config.route.v3.ScopedRouteConfiguration.name <envoy_v3_api_field_config.route.v3.ScopedRouteConfiguration.name>`
+  - :ref:`envoy.config.cluster.v3.Cluster.name <envoy_v3_api_field_config.cluster.v3.Cluster.name>`
+  - :ref:`envoy.extensions.transport_sockets.tls.v3.Secret <envoy_v3_api_field_extensions.transport_sockets.tls.v3.Secret.name>`
+  - :ref:`envoy.config.endpoint.v3.ClusterLoadAssignment <envoy_v3_api_field_config.endpoint.v3.ClusterLoadAssignment.cluster_name>`
 
 .. _operations_admin_interface_config_dump_by_resource_and_mask:
 
@@ -205,6 +257,24 @@ modify different aspects of the server:
 
   See :option:`--hot-restart-version`.
 
+.. _operations_admin_interface_init_dump:
+
+.. http:get:: /init_dump
+
+  Dump current information of unready targets of various Envoy components as JSON-serialized proto
+  messages. See the :ref:`response definition <envoy_v3_api_msg_admin.v3.UnreadyTargetsDumps>` for more
+  information.
+
+.. _operations_admin_interface_init_dump_by_mask:
+
+.. http:get:: /init_dump?mask={}
+
+  When mask query parameters is specified, the mask value is the desired component to dump unready targets.
+  The mask is parsed as a ``ProtobufWkt::FieldMask``.
+
+  For example, get the unready targets of all listeners with
+  ``/init_dump?mask=listener``
+
 .. _operations_admin_interface_listeners:
 
 .. http:get:: /listeners
@@ -230,11 +300,13 @@ modify different aspects of the server:
 
   .. note::
 
-    Generally only used during development.
+    Generally only used during development. With ``--enable-fine-grain-logging`` being set, the logger is represented
+    by the path of the file it belongs to (to be specific, the path determined by ``__FILE__``), so the logger list
+    will show a list of file paths, and the specific path should be used as <logger_name> to change the log level.
 
 .. http:get:: /memory
 
-  Prints current memory allocation / heap usage, in bytes. Useful in lieu of printing all `/stats` and filtering to get the memory-related statistics.
+  Prints current memory allocation / heap usage, in bytes. Useful in lieu of printing all ``/stats`` and filtering to get the memory-related statistics.
 
 .. http:post:: /quitquitquit
 
@@ -249,20 +321,28 @@ modify different aspects of the server:
 .. _operations_admin_interface_drain:
 
 .. http:post:: /drain_listeners
-   
+
    :ref:`Drains <arch_overview_draining>` all listeners.
 
    .. http:post:: /drain_listeners?inboundonly
 
-   :ref:`Drains <arch_overview_draining>` all inbound listeners. `traffic_direction` field in 
-   :ref:`Listener <envoy_v3_api_msg_config.listener.v3.Listener>` is used to determine whether a listener 
+   :ref:`Drains <arch_overview_draining>` all inbound listeners. ``traffic_direction`` field in
+   :ref:`Listener <envoy_v3_api_msg_config.listener.v3.Listener>` is used to determine whether a listener
    is inbound or outbound.
+
+   .. http:post:: /drain_listeners?graceful
+
+   When draining listeners, enter a graceful drain period prior to closing listeners.
+   This behaviour and duration is configurable via server options or CLI
+   (:option:`--drain-time-s` and :option:`--drain-strategy`).
 
 .. attention::
 
    This operation directly stops the matched listeners on workers. Once listeners in a given
    traffic direction are stopped, listener additions and modifications in that direction
    are not allowed.
+
+.. _operations_admin_interface_server_info:
 
 .. http:get:: /server_info
 
@@ -301,7 +381,23 @@ modify different aspects of the server:
         "cpuset_threads": false
       },
       "uptime_current_epoch": "6s",
-      "uptime_all_epochs": "6s"
+      "uptime_all_epochs": "6s",
+      "node": {
+        "id": "node1",
+        "cluster": "cluster1",
+        "user_agent_name": "envoy",
+        "user_agent_build_version": {
+          "version": {
+            "major_number": 1,
+            "minor_number": 15,
+            "patch": 0
+          }
+        },
+        "metadata": {},
+        "extensions": [],
+        "client_features": [],
+        "listening_addresses": []
+      }
     }
 
   See the :ref:`ServerInfo proto <envoy_v3_api_msg_admin.v3.ServerInfo>` for an
@@ -318,7 +414,7 @@ modify different aspects of the server:
 
     LIVE
 
-  See the `state` field of the :ref:`ServerInfo proto <envoy_v3_api_msg_admin.v3.ServerInfo>` for an
+  See the ``state`` field of the :ref:`ServerInfo proto <envoy_v3_api_msg_admin.v3.ServerInfo>` for an
   explanation of the output.
 
 .. _operations_admin_interface_stats:
@@ -327,11 +423,13 @@ modify different aspects of the server:
 
   Outputs all statistics on demand. This command is very useful for local debugging.
   Histograms will output the computed quantiles i.e P0,P25,P50,P75,P90,P99,P99.9 and P100.
-  The output for each quantile will be in the form of (interval,cumulative) where interval value
-  represents the summary since last flush interval and cumulative value represents the
-  summary since the start of Envoy instance. "No recorded values" in the histogram output indicates
-  that it has not been updated with a value.
-  See :ref:`here <operations_stats>` for more information.
+  The output for each quantile will be in the form of (interval,cumulative) where the interval value
+  represents the summary since last flush. By default, a timer is setup to flush in intervals
+  defined by :ref:`stats_flush_interval <envoy_v3_api_field_config.bootstrap.v3.Bootstrap.stats_flush_interval>`,
+  defaulting to 5 seconds. If :ref:`stats_flush_on_admin <envoy_v3_api_field_config.bootstrap.v3.Bootstrap.stats_flush_on_admin>`
+  is specified, stats are flushed when this endpoint is queried and a timer will not be used. The cumulative
+  value represents the summary since the start of Envoy instance. "No recorded values" in the histogram
+  output indicates that it has not been updated with a value. See :ref:`here <operations_stats>` for more information.
 
   .. http:get:: /stats?usedonly
 
@@ -341,10 +439,10 @@ modify different aspects of the server:
   .. http:get:: /stats?filter=regex
 
   Filters the returned stats to those with names matching the regular expression
-  `regex`. Compatible with `usedonly`. Performs partial matching by default, so
-  `/stats?filter=server` will return all stats containing the word `server`.
+  ``regex``. Compatible with ``usedonly``. Performs partial matching by default, so
+  ``/stats?filter=server`` will return all stats containing the word ``server``.
   Full-string matching can be specified with begin- and end-line anchors. (i.e.
-  `/stats?filter=^server.concurrency$`)
+  ``/stats?filter=^server.concurrency$``)
 
 .. http:get:: /stats?format=json
 
@@ -411,17 +509,31 @@ modify different aspects of the server:
   Outputs /stats in `Prometheus <https://prometheus.io/docs/instrumenting/exposition_formats/>`_
   v0.0.4 format. This can be used to integrate with a Prometheus server.
 
-  You can optionally pass the `usedonly` URL query argument to only get statistics that
-  Envoy has updated (counters incremented at least once, gauges changed at least once,
-  and histograms added to at least once)
+  .. http:get:: /stats?format=prometheus&usedonly
 
-  .. http:get:: /stats/recentlookups
+  You can optionally pass the ``usedonly`` URL query parameter to only get statistics that
+  Envoy has updated (counters incremented at least once, gauges changed at least once,
+  and histograms added to at least once).
+
+  .. http:get:: /stats?format=prometheus&text_readouts
+
+  Optional ``text_readouts`` query parameter is used to get all stats including text readouts.
+  Text readout stats are returned in gauge format. These gauges always have value 0. Each
+  gauge record has additional label named ``text_value`` that contains value of a text readout.
+
+  .. warning::
+    Every unique combination of key-value label pair represents a new time series
+    in Prometheus, which can dramatically increase the amount of data stored.
+    Text readout stats create a new label value every time the value
+    of the text readout stat changes, which could create an unbounded number of time series.
+
+.. http:get:: /stats/recentlookups
 
   This endpoint helps Envoy developers debug potential contention
   issues in the stats system. Initially, only the count of StatName
   lookups is acumulated, not the specific names that are being looked
   up. In order to see specific recent requests, you must enable the
-  feature by POSTing to `/stats/recentlookups/enable`. There may be
+  feature by POSTing to ``/stats/recentlookups/enable``. There may be
   approximately 40-100 nanoseconds of added overhead per lookup.
 
   When enabled, this endpoint emits a table of stat names that were
@@ -433,9 +545,6 @@ modify different aspects of the server:
   but in response to user requests on high core-count machines, this
   can cause performance issues due to mutex contention.
 
-  This admin endpoint requires Envoy to be started with option
-  `--use-fake-symbol-table 0`.
-
   See :repo:`source/docs/stats.md` for more details.
 
   Note also that actual mutex contention can be tracked via :http:get:`/contention`.
@@ -443,15 +552,15 @@ modify different aspects of the server:
   .. http:post:: /stats/recentlookups/enable
 
   Turns on collection of recent lookup of stat-names, thus enabling
-  `/stats/recentlookups`.
+  ``/stats/recentlookups``.
 
   See :repo:`source/docs/stats.md` for more details.
 
   .. http:post:: /stats/recentlookups/disable
 
   Turns off collection of recent lookup of stat-names, thus disabling
-  `/stats/recentlookups`. It also clears the list of lookups. However,
-  the total count, visible as stat `server.stats_recent_lookups`, is
+  ``/stats/recentlookups``. It also clears the list of lookups. However,
+  the total count, visible as stat ``server.stats_recent_lookups``, is
   not cleared, and continues to accumulate.
 
   See :repo:`source/docs/stats.md` for more details.

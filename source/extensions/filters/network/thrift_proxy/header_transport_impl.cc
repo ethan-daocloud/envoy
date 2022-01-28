@@ -1,12 +1,13 @@
-#include "extensions/filters/network/thrift_proxy/header_transport_impl.h"
+#include "source/extensions/filters/network/thrift_proxy/header_transport_impl.h"
 
 #include <limits>
 
 #include "envoy/common/exception.h"
 
-#include "common/buffer/buffer_impl.h"
+#include "source/common/buffer/buffer_impl.h"
+#include "source/extensions/filters/network/thrift_proxy/buffer_helper.h"
 
-#include "extensions/filters/network/thrift_proxy/buffer_helper.h"
+#include "absl/strings/str_replace.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -62,7 +63,9 @@ bool HeaderTransportImpl::decodeFrameStart(Buffer::Instance& buffer, MessageMeta
     throw EnvoyException(fmt::format("invalid thrift header transport magic {:04x}", magic));
   }
 
-  // offset 6: 16 bit flags field, unused
+  // offset 6: 16 bit flags field
+  int16_t header_flags = buffer.peekBEInt<int16_t>(6);
+
   // offset 8: 32 bit sequence number field
   int32_t seq_id = buffer.peekBEInt<int32_t>(8);
 
@@ -91,6 +94,7 @@ bool HeaderTransportImpl::decodeFrameStart(Buffer::Instance& buffer, MessageMeta
   // (header_size).
   metadata.setFrameSize(
       static_cast<uint32_t>(frame_size - header_size - MinFrameStartSizeNoHeaders));
+  metadata.setHeaderFlags(header_flags);
   metadata.setSequenceId(seq_id);
 
   ProtocolType proto = ProtocolType::Auto;
@@ -143,8 +147,11 @@ bool HeaderTransportImpl::decodeFrameStart(Buffer::Instance& buffer, MessageMeta
     }
 
     while (num_headers-- > 0) {
-      const Http::LowerCaseString key =
-          Http::LowerCaseString(drainVarString(buffer, header_size, "header key"));
+      std::string key_string = drainVarString(buffer, header_size, "header key");
+      // LowerCaseString doesn't allow '\0', '\n', and '\r'.
+      key_string =
+          absl::StrReplaceAll(key_string, {{std::string(1, '\0'), ""}, {"\n", ""}, {"\r", ""}});
+      const Http::LowerCaseString key = Http::LowerCaseString(key_string);
       const std::string value = drainVarString(buffer, header_size, "header value");
       metadata.headers().addCopy(key, value);
     }
@@ -205,14 +212,11 @@ void HeaderTransportImpl::encodeFrame(Buffer::Instance& buffer, const MessageMet
     // Num headers
     BufferHelper::writeVarIntI32(header_buffer, static_cast<int32_t>(headers.size()));
 
-    headers.iterate(
-        [](const Http::HeaderEntry& header, void* context) -> Http::HeaderMap::Iterate {
-          Buffer::Instance* hb = static_cast<Buffer::Instance*>(context);
-          writeVarString(*hb, header.key().getStringView());
-          writeVarString(*hb, header.value().getStringView());
-          return Http::HeaderMap::Iterate::Continue;
-        },
-        &header_buffer);
+    headers.iterate([&header_buffer](const Http::HeaderEntry& header) -> Http::HeaderMap::Iterate {
+      writeVarString(header_buffer, header.key().getStringView());
+      writeVarString(header_buffer, header.value().getStringView());
+      return Http::HeaderMap::Iterate::Continue;
+    });
   }
 
   uint64_t header_size = header_buffer.length();
@@ -236,10 +240,14 @@ void HeaderTransportImpl::encodeFrame(Buffer::Instance& buffer, const MessageMet
   if (metadata.hasSequenceId()) {
     seq_id = metadata.sequenceId();
   }
+  int16_t header_flags = 0;
+  if (metadata.hasHeaderFlags()) {
+    header_flags = metadata.headerFlags();
+  }
 
   buffer.writeBEInt<uint32_t>(static_cast<uint32_t>(size));
   buffer.writeBEInt<uint16_t>(Magic);
-  buffer.writeBEInt<uint16_t>(0); // flags
+  buffer.writeBEInt<uint16_t>(header_flags); // flags
   buffer.writeBEInt<int32_t>(seq_id);
   buffer.writeBEInt<uint16_t>(static_cast<uint16_t>(header_size / 4));
 

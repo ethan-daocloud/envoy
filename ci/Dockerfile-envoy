@@ -1,17 +1,25 @@
-FROM ubuntu:16.04
+ARG BUILD_OS=ubuntu
+ARG BUILD_TAG=18.04
 
-RUN apt-get update \
-    && apt-get upgrade -y \
-    && apt-get install -y ca-certificates \
-    && apt-get autoremove -y \
-    && apt-get clean \
+# Final stage
+FROM $BUILD_OS:$BUILD_TAG
+ARG TARGETPLATFORM
+
+RUN apt-get update && apt-get upgrade -y \
+    && apt-get install --no-install-recommends -y ca-certificates \
+    && apt-get autoremove -y && apt-get clean \
     && rm -rf /tmp/* /var/tmp/* \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /etc/envoy
 
-ADD build_release_stripped/envoy /usr/local/bin/envoy
-ADD configs/google_com_proxy.v2.yaml /etc/envoy/envoy.yaml
+ARG ENVOY_BINARY=envoy
+ARG ENVOY_BINARY_SUFFIX=_stripped
+ADD ${TARGETPLATFORM}/build_${ENVOY_BINARY}_release${ENVOY_BINARY_SUFFIX}/* /usr/local/bin/
+ADD configs/envoyproxy_io_proxy.yaml /etc/envoy/envoy.yaml
+
+ADD ${TARGETPLATFORM}/build_${ENVOY_BINARY}_release/su-exec /usr/local/bin/
+RUN chown root:root /usr/local/bin/su-exec && adduser --group --system envoy
 
 EXPOSE 10000
 

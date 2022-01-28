@@ -1,11 +1,11 @@
-licenses(["notice"])  # Apache 2
-
 load(
     "//bazel:envoy_build_system.bzl",
     "envoy_cc_test_binary",
     "envoy_cc_test_library",
     "envoy_package",
 )
+
+licenses(["notice"])  # Apache 2
 
 envoy_package()
 
@@ -25,7 +25,7 @@ envoy_cc_test_library(
     copts = ["-DHAVE_LONG_LONG"],
     external_deps = ["tclap"],
     deps = [
-        "//include/envoy/api:api_interface",
+        "//envoy/api:api_interface",
         "//source/common/protobuf:utility_lib",
         "//source/common/stats:isolated_store_lib",
         "//test/test_common:utility_lib",

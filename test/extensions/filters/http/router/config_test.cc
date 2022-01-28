@@ -4,9 +4,9 @@
 #include "envoy/extensions/filters/http/router/v3/router.pb.validate.h"
 #include "envoy/registry/registry.h"
 
-#include "extensions/filters/http/router/config.h"
+#include "source/extensions/filters/http/router/config.h"
 
-#include "test/mocks/server/mocks.h"
+#include "test/mocks/server/factory_context.h"
 #include "test/test_common/utility.h"
 
 #include "gmock/gmock.h"
@@ -58,17 +58,10 @@ TEST(RouterFilterConfigTest, RouterFilterWithUnsupportedStrictHeaderCheck) {
 
   NiceMock<Server::Configuration::MockFactoryContext> context;
   RouterFilterConfig factory;
-  EXPECT_THROW_WITH_MESSAGE(
+  EXPECT_THROW_WITH_REGEX(
       factory.createFilterFactoryFromProto(router_config, "stats.", context),
       ProtoValidationException,
-      "Proto constraint validation failed (RouterValidationError.StrictCheckHeaders[i]: "
-      "[\"value must be in list \" ["
-      "\"x-envoy-upstream-rq-timeout-ms\" "
-      "\"x-envoy-upstream-rq-per-try-timeout-ms\" "
-      "\"x-envoy-max-retries\" "
-      "\"x-envoy-retry-grpc-on\" "
-      "\"x-envoy-retry-on\""
-      "]]): strict_check_headers: \"unsupportedHeader\"\n");
+      "Proto constraint validation failed \\(RouterValidationError.StrictCheckHeaders");
 }
 
 TEST(RouterFilterConfigTest, RouterV2Filter) {
@@ -79,7 +72,7 @@ TEST(RouterFilterConfigTest, RouterV2Filter) {
   RouterFilterConfig factory;
   Http::FilterFactoryCb cb = factory.createFilterFactoryFromProto(router_config, "stats.", context);
   Http::MockFilterChainFactoryCallbacks filter_callback;
-  EXPECT_CALL(filter_callback, addStreamDecoderFilter(_)).Times(1);
+  EXPECT_CALL(filter_callback, addStreamDecoderFilter(_));
   cb(filter_callback);
 }
 
@@ -89,18 +82,8 @@ TEST(RouterFilterConfigTest, RouterFilterWithEmptyProtoConfig) {
   Http::FilterFactoryCb cb =
       factory.createFilterFactoryFromProto(*factory.createEmptyConfigProto(), "stats.", context);
   Http::MockFilterChainFactoryCallbacks filter_callback;
-  EXPECT_CALL(filter_callback, addStreamDecoderFilter(_)).Times(1);
+  EXPECT_CALL(filter_callback, addStreamDecoderFilter(_));
   cb(filter_callback);
-}
-
-// Test that the deprecated extension name still functions.
-TEST(RouterFilterConfigTest, DEPRECATED_FEATURE_TEST(DeprecatedExtensionFilterName)) {
-  const std::string deprecated_name = "envoy.router";
-
-  ASSERT_NE(
-      nullptr,
-      Registry::FactoryRegistry<Server::Configuration::NamedHttpFilterConfigFactory>::getFactory(
-          deprecated_name));
 }
 
 } // namespace

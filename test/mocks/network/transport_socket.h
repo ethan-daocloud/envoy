@@ -26,6 +26,7 @@ public:
   MOCK_METHOD(IoResult, doWrite, (Buffer::Instance & buffer, bool end_stream));
   MOCK_METHOD(void, onConnected, ());
   MOCK_METHOD(Ssl::ConnectionInfoConstSharedPtr, ssl, (), (const));
+  MOCK_METHOD(bool, startSecureTransport, ());
 
   TransportSocketCallbacks* callbacks_{};
 };
@@ -36,7 +37,9 @@ public:
   ~MockTransportSocketFactory() override;
 
   MOCK_METHOD(bool, implementsSecureTransport, (), (const));
-  MOCK_METHOD(TransportSocketPtr, createTransportSocket, (TransportSocketOptionsSharedPtr),
+  MOCK_METHOD(bool, usesProxyProtocolOptions, (), (const));
+  MOCK_METHOD(bool, supportsAlpn, (), (const));
+  MOCK_METHOD(TransportSocketPtr, createTransportSocket, (TransportSocketOptionsConstSharedPtr),
               (const));
 };
 

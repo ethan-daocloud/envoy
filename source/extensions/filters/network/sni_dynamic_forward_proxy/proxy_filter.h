@@ -1,12 +1,11 @@
 #pragma once
 
-#include "envoy/extensions/filters/network/sni_dynamic_forward_proxy/v3alpha/sni_dynamic_forward_proxy.pb.h"
+#include "envoy/extensions/filters/network/sni_dynamic_forward_proxy/v3/sni_dynamic_forward_proxy.pb.h"
 #include "envoy/network/filter.h"
 #include "envoy/upstream/cluster_manager.h"
 
-#include "common/common/logger.h"
-
-#include "extensions/common/dynamic_forward_proxy/dns_cache.h"
+#include "source/common/common/logger.h"
+#include "source/extensions/common/dynamic_forward_proxy/dns_cache.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -14,7 +13,7 @@ namespace NetworkFilters {
 namespace SniDynamicForwardProxy {
 
 using FilterConfig =
-    envoy::extensions::filters::network::sni_dynamic_forward_proxy::v3alpha::FilterConfig;
+    envoy::extensions::filters::network::sni_dynamic_forward_proxy::v3::FilterConfig;
 
 class ProxyFilterConfig {
 public:
@@ -24,14 +23,12 @@ public:
       Upstream::ClusterManager& cluster_manager);
 
   Extensions::Common::DynamicForwardProxy::DnsCache& cache() { return *dns_cache_; }
-  Upstream::ClusterManager& clusterManager() { return cluster_manager_; }
   uint32_t port() { return port_; }
 
 private:
   const uint32_t port_;
   const Extensions::Common::DynamicForwardProxy::DnsCacheManagerSharedPtr dns_cache_manager_;
   const Extensions::Common::DynamicForwardProxy::DnsCacheSharedPtr dns_cache_;
-  Upstream::ClusterManager& cluster_manager_;
 };
 
 using ProxyFilterConfigSharedPtr = std::shared_ptr<ProxyFilterConfig>;
@@ -42,6 +39,7 @@ class ProxyFilter
       Logger::Loggable<Logger::Id::forward_proxy> {
 public:
   ProxyFilter(ProxyFilterConfigSharedPtr config);
+
   // Network::ReadFilter
   Network::FilterStatus onData(Buffer::Instance&, bool) override {
     return Network::FilterStatus::Continue;
@@ -52,10 +50,12 @@ public:
   }
 
   // Extensions::Common::DynamicForwardProxy::DnsCache::LoadDnsCacheEntryCallbacks
-  void onLoadDnsCacheComplete() override;
+  void onLoadDnsCacheComplete(
+      const Extensions::Common::DynamicForwardProxy::DnsHostInfoSharedPtr&) override;
 
 private:
   const ProxyFilterConfigSharedPtr config_;
+  Upstream::ResourceAutoIncDecPtr circuit_breaker_;
   Extensions::Common::DynamicForwardProxy::DnsCache::LoadDnsCacheEntryHandlePtr cache_load_handle_;
   Network::ReadFilterCallbacks* read_callbacks_{};
 };

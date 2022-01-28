@@ -6,6 +6,7 @@
 
 #include "envoy/config/core/v3/http_uri.pb.h"
 #include "envoy/config/core/v3/protocol.pb.h"
+#include "envoy/config/route/v3/route_components.pb.h"
 #include "envoy/grpc/status.h"
 #include "envoy/http/codes.h"
 #include "envoy/http/filter.h"
@@ -13,9 +14,8 @@
 #include "envoy/http/metadata_interface.h"
 #include "envoy/http/query_params.h"
 
-#include "common/http/exception.h"
-#include "common/http/status.h"
-#include "common/json/json_loader.h"
+#include "source/common/http/exception.h"
+#include "source/common/http/status.h"
 
 #include "absl/strings/string_view.h"
 #include "absl/types/optional.h"
@@ -25,11 +25,20 @@ namespace Envoy {
 namespace Http {
 namespace Utility {
 
-// This is a wrapper around dispatch calls that may throw an exception or may return an error status
-// while exception removal is in migration.
-// TODO(#10878): Remove this.
-Http::Status exceptionToStatus(std::function<Http::Status(Buffer::Instance&)> dispatch,
-                               Buffer::Instance& data);
+/**
+ * Well-known HTTP ALPN values.
+ */
+class AlpnNameValues {
+public:
+  const std::string Http10 = "http/1.0";
+  const std::string Http11 = "http/1.1";
+  const std::string Http2 = "h2";
+  const std::string Http2c = "h2c";
+  const std::string Http3 = "h3";
+};
+
+using AlpnNames = ConstSingleton<AlpnNameValues>;
+
 } // namespace Utility
 } // namespace Http
 
@@ -102,9 +111,29 @@ struct OptionsLimits {
 envoy::config::core::v3::Http2ProtocolOptions
 initializeAndValidateOptions(const envoy::config::core::v3::Http2ProtocolOptions& options);
 
+envoy::config::core::v3::Http2ProtocolOptions
+initializeAndValidateOptions(const envoy::config::core::v3::Http2ProtocolOptions& options,
+                             bool hcm_stream_error_set,
+                             const Protobuf::BoolValue& hcm_stream_error);
 } // namespace Utility
 } // namespace Http2
+namespace Http3 {
+namespace Utility {
 
+// Limits and defaults for `envoy::config::core::v3::Http3ProtocolOptions` protos.
+struct OptionsLimits {
+  // The same as kStreamReceiveWindowLimit in QUICHE which is the maximum supported by QUICHE.
+  static const uint32_t DEFAULT_INITIAL_STREAM_WINDOW_SIZE = 16 * 1024 * 1024;
+  // The same as kSessionReceiveWindowLimit in QUICHE which is the maximum supported by QUICHE.
+  static const uint32_t DEFAULT_INITIAL_CONNECTION_WINDOW_SIZE = 24 * 1024 * 1024;
+};
+
+envoy::config::core::v3::Http3ProtocolOptions
+initializeAndValidateOptions(const envoy::config::core::v3::Http3ProtocolOptions& options,
+                             bool hcm_stream_error_set,
+                             const Protobuf::BoolValue& hcm_stream_error);
+} // namespace Utility
+} // namespace Http3
 namespace Http {
 namespace Utility {
 
@@ -128,12 +157,15 @@ private:
 class PercentEncoding {
 public:
   /**
-   * Encodes string view to its percent encoded representation.
+   * Encodes string view to its percent encoded representation. Non-visible ASCII is always escaped,
+   * in addition to a given list of reserved chars.
+   *
    * @param value supplies string to be encoded.
-   * @return std::string percent-encoded string based on
-   * https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#responses.
+   * @param reserved_chars list of reserved chars to escape. By default the escaped chars in
+   *        https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#responses are used.
+   * @return std::string percent-encoded string.
    */
-  static std::string encode(absl::string_view value);
+  static std::string encode(absl::string_view value, absl::string_view reserved_chars = "%");
 
   /**
    * Decodes string view from its percent encoded representation.
@@ -144,7 +176,8 @@ public:
 
 private:
   // Encodes string view to its percent encoded representation, with start index.
-  static std::string encode(absl::string_view value, const size_t index);
+  static std::string encode(absl::string_view value, const size_t index,
+                            const absl::flat_hash_set<char>& reserved_char_set);
 };
 
 /**
@@ -162,6 +195,14 @@ void appendXff(RequestHeaderMap& headers, const Network::Address::Instance& remo
 void appendVia(RequestOrResponseHeaderMap& headers, const std::string& via);
 
 /**
+ * Update authority with the specified hostname.
+ * @param headers headers where authority should be updated.
+ * @param hostname hostname that authority should be updated with.
+ * @param append_xfh append the original authority to the x-forwarded-host header.
+ */
+void updateAuthority(RequestHeaderMap& headers, absl::string_view hostname, bool append_xfh);
+
+/**
  * Creates an SSL (https) redirect path based on the input host and path headers.
  * @param headers supplies the request headers.
  * @return std::string the redirect path.
@@ -176,6 +217,13 @@ std::string createSslRedirectPath(const RequestHeaderMap& headers);
 QueryParams parseQueryString(absl::string_view url);
 
 /**
+ * Parse a URL into query parameters.
+ * @param url supplies the url to parse.
+ * @return QueryParams the parsed and percent-decoded parameters, if any.
+ */
+QueryParams parseAndDecodeQueryString(absl::string_view url);
+
+/**
  * Parse a a request body into query parameters.
  * @param body supplies the body to parse.
  * @return QueryParams the parsed parameters, if any.
@@ -186,9 +234,11 @@ QueryParams parseFromBody(absl::string_view body);
  * Parse query parameters from a URL or body.
  * @param data supplies the data to parse.
  * @param start supplies the offset within the data.
+ * @param decode_params supplies the flag whether to percent-decode the parsed parameters (both name
+ *        and value). Set to false to keep the parameters encoded.
  * @return QueryParams the parsed parameters, if any.
  */
-QueryParams parseParameters(absl::string_view data, size_t start);
+QueryParams parseParameters(absl::string_view data, size_t start, bool decode_params);
 
 /**
  * Finds the start of the query string in a path
@@ -200,12 +250,58 @@ QueryParams parseParameters(absl::string_view data, size_t start);
 absl::string_view findQueryStringStart(const HeaderString& path);
 
 /**
+ * Returns the path without the query string.
+ * @param path supplies a HeaderString& possibly containing a query string.
+ * @return std::string the path without query string.
+ */
+std::string stripQueryString(const HeaderString& path);
+
+/**
+ * Replace the query string portion of a given path with a new one.
+ *
+ * e.g. replaceQueryString("/foo?key=1", {key:2}) -> "/foo?key=2"
+ *      replaceQueryString("/bar", {hello:there}) -> "/bar?hello=there"
+ *
+ * @param path the original path that may or may not contain an existing query string
+ * @param params the new params whose string representation should be formatted onto
+ *               the `path` above
+ * @return std::string the new path whose query string has been replaced by `params` and whose path
+ *         portion from `path` remains unchanged.
+ */
+std::string replaceQueryString(const HeaderString& path, const QueryParams& params);
+
+/**
  * Parse a particular value out of a cookie
  * @param headers supplies the headers to get the cookie from.
  * @param key the key for the particular cookie value to return
  * @return std::string the parsed cookie value, or "" if none exists
  **/
 std::string parseCookieValue(const HeaderMap& headers, const std::string& key);
+
+/**
+ * Parse cookies from header into a map.
+ * @param headers supplies the headers to get cookies from.
+ * @param key_filter predicate that returns true for every cookie key to be included.
+ * @return absl::flat_hash_map cookie map.
+ **/
+absl::flat_hash_map<std::string, std::string>
+parseCookies(const RequestHeaderMap& headers,
+             const std::function<bool(absl::string_view)>& key_filter);
+
+/**
+ * Parse cookies from header into a map.
+ * @param headers supplies the headers to get cookies from.
+ * @return absl::flat_hash_map cookie map.
+ **/
+absl::flat_hash_map<std::string, std::string> parseCookies(const RequestHeaderMap& headers);
+
+/**
+ * Parse a particular value out of a set-cookie
+ * @param headers supplies the headers to get the set-cookie from.
+ * @param key the key for the particular set-cookie value to return
+ * @return std::string the parsed set-cookie value, or "" if none exists
+ **/
+std::string parseSetCookieValue(const HeaderMap& headers, const std::string& key);
 
 /**
  * Produce the value for a Set-Cookie header with the given parameters.
@@ -229,6 +325,13 @@ std::string makeSetCookieValue(const std::string& key, const std::string& value,
 uint64_t getResponseStatus(const ResponseHeaderMap& headers);
 
 /**
+ * Get the response status from the response headers.
+ * @param headers supplies the headers to get the status from.
+ * @return absl::optional<uint64_t> the response code or absl::nullopt if the headers are invalid.
+ */
+absl::optional<uint64_t> getResponseStatusNoThrow(const ResponseHeaderMap& headers);
+
+/**
  * Determine whether these headers are a valid Upgrade request or response.
  * This function returns true if the following HTTP headers and values are present:
  * - Connection: Upgrade
@@ -249,55 +352,60 @@ bool isH2UpgradeRequest(const RequestHeaderMap& headers);
  */
 bool isWebSocketUpgradeRequest(const RequestHeaderMap& headers);
 
-/**
- * @return Http1Settings An Http1Settings populated from the
- * envoy::api::v2::core::Http1ProtocolOptions config.
- */
-Http1Settings parseHttp1Settings(const envoy::config::core::v3::Http1ProtocolOptions& config);
+struct EncodeFunctions {
+  // Function to modify locally generated response headers.
+  std::function<void(ResponseHeaderMap& headers)> modify_headers_;
+  // Function to rewrite locally generated response.
+  std::function<void(ResponseHeaderMap& response_headers, Code& code, std::string& body,
+                     absl::string_view& content_type)>
+      rewrite_;
+  // Function to encode response headers.
+  std::function<void(ResponseHeaderMapPtr&& headers, bool end_stream)> encode_headers_;
+  // Function to encode the response body.
+  std::function<void(Buffer::Instance& data, bool end_stream)> encode_data_;
+};
+
+struct LocalReplyData {
+  // Tells if this is a response to a gRPC request.
+  bool is_grpc_;
+  // Supplies the HTTP response code.
+  Code response_code_;
+  // Supplies the optional body text which is returned.
+  absl::string_view body_text_;
+  // gRPC status code to override the httpToGrpcStatus mapping with.
+  const absl::optional<Grpc::Status::GrpcStatus> grpc_status_;
+  // Tells if this is a response to a HEAD request.
+  bool is_head_request_ = false;
+};
 
 /**
  * Create a locally generated response using filter callbacks.
- * @param is_grpc tells if this is a response to a gRPC request.
- * @param callbacks supplies the filter callbacks to use.
  * @param is_reset boolean reference that indicates whether a stream has been reset. It is the
- *                 responsibility of the caller to ensure that this is set to false if onDestroy()
- *                 is invoked in the context of sendLocalReply().
- * @param response_code supplies the HTTP response code.
- * @param body_text supplies the optional body text which is sent using the text/plain content
- *                  type.
- * @param grpc_status the gRPC status code to override the httpToGrpcStatus mapping with.
- * @param is_head_request tells if this is a response to a HEAD request
+ *        responsibility of the caller to ensure that this is set to false if onDestroy()
+ *        is invoked in the context of sendLocalReply().
+ * @param callbacks supplies the filter callbacks to use.
+ * @param local_reply_data struct which keeps data related to generate reply.
  */
-void sendLocalReply(bool is_grpc, StreamDecoderFilterCallbacks& callbacks, const bool& is_reset,
-                    Code response_code, absl::string_view body_text,
-                    const absl::optional<Grpc::Status::GrpcStatus> grpc_status,
-                    bool is_head_request);
+void sendLocalReply(const bool& is_reset, StreamDecoderFilterCallbacks& callbacks,
+                    const LocalReplyData& local_reply_data);
 
 /**
  * Create a locally generated response using the provided lambdas.
- * @param is_grpc tells if this is a response to a gRPC request.
- * @param encode_headers supplies the function to encode response headers.
- * @param encode_data supplies the function to encode the response body.
+
  * @param is_reset boolean reference that indicates whether a stream has been reset. It is the
  *                 responsibility of the caller to ensure that this is set to false if onDestroy()
  *                 is invoked in the context of sendLocalReply().
- * @param response_code supplies the HTTP response code.
- * @param body_text supplies the optional body text which is sent using the text/plain content
- *                  type.
- * @param grpc_status the gRPC status code to override the httpToGrpcStatus mapping with.
+ * @param encode_functions supplies the functions to encode response body and headers.
+ * @param local_reply_data struct which keeps data related to generate reply.
  */
-void sendLocalReply(
-    bool is_grpc,
-    std::function<void(ResponseHeaderMapPtr&& headers, bool end_stream)> encode_headers,
-    std::function<void(Buffer::Instance& data, bool end_stream)> encode_data, const bool& is_reset,
-    Code response_code, absl::string_view body_text,
-    const absl::optional<Grpc::Status::GrpcStatus> grpc_status, bool is_head_request = false);
+void sendLocalReply(const bool& is_reset, const EncodeFunctions& encode_functions,
+                    const LocalReplyData& local_reply_data);
 
 struct GetLastAddressFromXffInfo {
   // Last valid address pulled from the XFF header.
   Network::Address::InstanceConstSharedPtr address_;
-  // Whether this is the only address in the XFF header.
-  bool single_address_;
+  // Whether this address can be used to determine if it's an internal request.
+  bool allow_trusted_address_checks_;
 };
 
 /**
@@ -328,6 +436,24 @@ bool sanitizeConnectionHeader(Http::RequestHeaderMap& headers);
 const std::string& getProtocolString(const Protocol p);
 
 /**
+ * Return the scheme of the request.
+ * For legacy code (envoy.reloadable_features.correct_scheme_and_xfp == false) this
+ * will be the value of the X-Forwarded-Proto header value. By default it will
+ * return the scheme if present, otherwise the value of X-Forwarded-Proto if
+ * present.
+ */
+absl::string_view getScheme(const RequestHeaderMap& headers);
+
+/**
+ * Constructs the original URI sent from the client from
+ * the request headers.
+ * @param request headers from the original request
+ * @param length to truncate the constructed URI's path
+ */
+std::string buildOriginalUri(const Http::RequestHeaderMap& request_headers,
+                             absl::optional<uint32_t> max_path_length);
+
+/**
  * Extract host and path from a URI. The host may contain port.
  * This function doesn't validate if the URI is valid. It only parses the URI with following
  * format: scheme://host/path.
@@ -337,6 +463,14 @@ const std::string& getProtocolString(const Protocol p);
  */
 void extractHostPathFromUri(const absl::string_view& uri, absl::string_view& host,
                             absl::string_view& path);
+
+/**
+ * Takes a the path component from a file:/// URI and returns a local path for file access.
+ * @param file_path if we have file:///foo/bar, the file_path is foo/bar. For file:///c:/foo/bar
+ *                  it is c:/foo/bar. This is not prefixed with /.
+ * @return std::string with absolute path for local access, e.g. /foo/bar, c:/foo/bar.
+ */
+std::string localPathFromFilePath(const absl::string_view& file_path);
 
 /**
  * Prepare headers for a HttpUri.
@@ -418,39 +552,10 @@ const ConfigType* resolveMostSpecificPerFilterConfig(const std::string& filter_n
                                                      const Router::RouteConstSharedPtr& route) {
   static_assert(std::is_base_of<Router::RouteSpecificFilterConfig, ConfigType>::value,
                 "ConfigType must be a subclass of Router::RouteSpecificFilterConfig");
-  const Router::RouteSpecificFilterConfig* generic_config =
-      resolveMostSpecificPerFilterConfigGeneric(filter_name, route);
-  return dynamic_cast<const ConfigType*>(generic_config);
-}
-
-/**
- * The non template implementation of traversePerFilterConfig. see
- * traversePerFilterConfig for docs.
- */
-void traversePerFilterConfigGeneric(
-    const std::string& filter_name, const Router::RouteConstSharedPtr& route,
-    std::function<void(const Router::RouteSpecificFilterConfig&)> cb);
-
-/**
- * Fold all the available per route filter configs, invoking the callback with each config (if
- * it is present). Iteration of the configs is in order of specificity. That means that the callback
- * will be called first for a config on a Virtual host, then a route, and finally a route entry
- * (weighted cluster). If a config is not present, the callback will not be invoked.
- */
-template <class ConfigType>
-void traversePerFilterConfig(const std::string& filter_name,
-                             const Router::RouteConstSharedPtr& route,
-                             std::function<void(const ConfigType&)> cb) {
-  static_assert(std::is_base_of<Router::RouteSpecificFilterConfig, ConfigType>::value,
-                "ConfigType must be a subclass of Router::RouteSpecificFilterConfig");
-
-  traversePerFilterConfigGeneric(
-      filter_name, route, [&cb](const Router::RouteSpecificFilterConfig& cfg) {
-        const ConfigType* typed_cfg = dynamic_cast<const ConfigType*>(&cfg);
-        if (typed_cfg != nullptr) {
-          cb(*typed_cfg);
-        }
-      });
+  if (!route) {
+    return nullptr;
+  }
+  return dynamic_cast<const ConfigType*>(route->mostSpecificPerFilterConfig(filter_name));
 }
 
 /**
@@ -472,14 +577,17 @@ getMergedPerFilterConfig(const std::string& filter_name, const Router::RouteCons
 
   absl::optional<ConfigType> merged;
 
-  traversePerFilterConfig<ConfigType>(filter_name, route,
-                                      [&reduce, &merged](const ConfigType& cfg) {
-                                        if (!merged) {
-                                          merged.emplace(cfg);
-                                        } else {
-                                          reduce(merged.value(), cfg);
-                                        }
-                                      });
+  if (route) {
+    route->traversePerFilterConfig(
+        filter_name, [&reduce, &merged](const Router::RouteSpecificFilterConfig& cfg) {
+          const ConfigType* typed_cfg = dynamic_cast<const ConfigType*>(&cfg);
+          if (!merged) {
+            merged.emplace(*typed_cfg);
+          } else {
+            reduce(merged.value(), *typed_cfg);
+          }
+        });
+  }
 
   return merged;
 }
@@ -503,6 +611,16 @@ struct AuthorityAttributes {
  * @return hostname parse result. that includes whether host is IP Address, hostname and port-name
  */
 AuthorityAttributes parseAuthority(absl::string_view host);
+
+/**
+ * It returns RetryPolicy defined in core api to route api.
+ * @param retry_policy core retry policy
+ * @param retry_on this specifies when retry should be invoked.
+ * @return route retry policy
+ */
+envoy::config::route::v3::RetryPolicy
+convertCoreToRouteRetryPolicy(const envoy::config::core::v3::RetryPolicy& retry_policy,
+                              const std::string& retry_on);
 } // namespace Utility
 } // namespace Http
 } // namespace Envoy

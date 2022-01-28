@@ -1,4 +1,4 @@
-.. _config_access_log:
+  .. _config_access_log:
 
 Access logging
 ==============
@@ -93,7 +93,7 @@ would be rendered as the number ``123``.
 Format dictionaries have the following restrictions:
 
 * The dictionary must map strings to strings (specifically, strings to command operators). Nesting
-  is not currently supported.
+  is supported.
 * When using the ``typed_json_format`` command operators will only produce typed output if the
   command operator is the only string that appears in the dictionary value. For example,
   ``"%DURATION%"`` will log a numeric duration value, but ``"%DURATION%.0"`` will log a string
@@ -103,6 +103,8 @@ Format dictionaries have the following restrictions:
 
   When using the ``typed_json_format``, integer values that exceed :math:`2^{53}` will be
   represented with reduced precision as they must be converted to floating point numbers.
+
+.. _config_access_log_command_operators:
 
 Command Operators
 -----------------
@@ -114,7 +116,9 @@ are noted.
 
 Note that if a value is not set/empty, the logs will contain a ``-`` character or, for JSON logs,
 the string ``"-"``. For typed JSON logs unset values are represented as ``null`` values and empty
-strings are rendered as ``""``.
+strings are rendered as ``""``. :ref:`omit_empty_values
+<envoy_v3_api_field_config.core.v3.SubstitutionFormatString.omit_empty_values>` option could be used
+to omit empty values entirely.
 
 Unless otherwise noted, command operators produce string outputs for typed JSON logs.
 
@@ -159,6 +163,13 @@ The following command operators are supported:
 
   In typed JSON logs, START_TIME is always rendered as a string.
 
+%REQUEST_HEADERS_BYTES%
+  HTTP
+    Uncompressed bytes of request headers.
+
+  TCP
+    Not implemented (0).
+
 %BYTES_RECEIVED%
   HTTP
     Body bytes received.
@@ -170,7 +181,7 @@ The following command operators are supported:
 
 %PROTOCOL%
   HTTP
-    Protocol. Currently either *HTTP/1.1* or *HTTP/2*.
+    Protocol. Currently either *HTTP/1.1* *HTTP/2* or *HTTP/3*.
 
   TCP
     Not implemented ("-").
@@ -182,6 +193,10 @@ The following command operators are supported:
   HTTP
     HTTP response code. Note that a response code of '0' means that the server never sent the
     beginning of a response. This generally means that the (downstream) client disconnected.
+
+    Note that in the case of 100-continue responses, only the response code of the final headers
+    will be logged. If a 100-continue is followed by a 200, the logged response will be 200.
+    If a 100-continue results in a disconnect, the 100 will be logged.
 
   TCP
     Not implemented ("-").
@@ -198,12 +213,100 @@ The following command operators are supported:
   TCP
     Not implemented ("-")
 
+.. _config_access_log_format_connection_termination_details:
+
+%CONNECTION_TERMINATION_DETAILS%
+  HTTP and TCP
+    Connection termination details may provide additional information about why the connection was
+    terminated by Envoy for L4 reasons.
+
+%RESPONSE_HEADERS_BYTES%
+  HTTP
+    Uncompressed bytes of response headers.
+
+  TCP
+    Not implemented (0).
+
+%RESPONSE_TRAILERS_BYTES%
+  HTTP
+    Uncompressed bytes of response trailers.
+
+  TCP
+    Not implemented (0).
+
 %BYTES_SENT%
   HTTP
     Body bytes sent. For WebSocket connection it will also include response header bytes.
 
   TCP
     Downstream bytes sent on connection.
+
+%UPSTREAM_REQUEST_ATTEMPT_COUNT%
+  HTTP
+    Number of times the request is attempted upstream. Note that an attempt count of '0' means that
+    the request was never attempted upstream.
+
+  TCP
+    Number of times the connection request is attempted upstream. Note that an attempt count of '0'
+    means that the connection request was never attempted upstream.
+
+  Renders a numeric value in typed JSON logs.
+
+%UPSTREAM_WIRE_BYTES_SENT%
+  HTTP
+    Total number of bytes sent to the upstream by the http stream.
+
+  TCP
+    Not implemented (0).
+
+%UPSTREAM_WIRE_BYTES_RECEIVED%
+  HTTP
+    Total number of bytes received from the upstream by the http stream.
+
+  TCP
+    Not implemented (0).
+
+%UPSTREAM_HEADER_BYTES_SENT%
+  HTTP
+    Number of header bytes sent to the upstream by the http stream.
+
+  TCP
+    Not implemented (0).
+
+%UPSTREAM_HEADER_BYTES_RECEIVED%
+  HTTP
+    Number of header bytes received from the upstream by the http stream.
+
+  TCP
+    Not implemented (0).
+
+%DOWNSTREAM_WIRE_BYTES_SENT%
+  HTTP
+    Total number of bytes sent to the downstream by the http stream.
+
+  TCP
+    Not implemented (0).
+
+%DOWNSTREAM_WIRE_BYTES_RECEIVED%
+  HTTP
+    Total number of bytes received from the downstream by the http stream. Envoy over counts sizes of received HTTP/1.1 pipelined requests by adding up bytes of requests in the pipeline to the one currently being processed.
+
+  TCP
+    Not implemented (0).
+
+%DOWNSTREAM_HEADER_BYTES_SENT%
+  HTTP
+    Number of header bytes sent to the downstream by the http stream.
+
+  TCP
+    Not implemented (0).
+
+%DOWNSTREAM_HEADER_BYTES_RECEIVED%
+  HTTP
+    Number of header bytes received from the downstream by the http stream.
+
+  TCP
+    Not implemented (0).
 
   Renders a numeric value in typed JSON logs.
 
@@ -220,6 +323,15 @@ The following command operators are supported:
   HTTP
     Total duration in milliseconds of the request from the start time to the last byte of
     the request received from the downstream.
+
+  TCP
+    Not implemented ("-").
+
+  Renders a numeric value in typed JSON logs.
+
+%REQUEST_TX_DURATION%
+  HTTP
+    Total duration in milliseconds of the request from the start time to the last byte sent upstream.
 
   TCP
     Not implemented ("-").
@@ -258,6 +370,8 @@ The following command operators are supported:
     * **UO**: Upstream overflow (:ref:`circuit breaking <arch_overview_circuit_break>`) in addition to 503 response code.
     * **NR**: No :ref:`route configured <arch_overview_http_routing>` for a given request in addition to 404 response code, or no matching filter chain for a downstream connection.
     * **URX**: The request was rejected because the :ref:`upstream retry limit (HTTP) <envoy_v3_api_field_config.route.v3.RetryPolicy.num_retries>`  or :ref:`maximum connect attempts (TCP) <envoy_v3_api_field_extensions.filters.network.tcp_proxy.v3.TcpProxy.max_connect_attempts>` was reached.
+    * **NC**: Upstream cluster not found.
+    * **DT**: When a request or connection exceeded :ref:`max_connection_duration <envoy_v3_api_field_config.core.v3.HttpProtocolOptions.max_connection_duration>` or :ref:`max_downstream_connection_duration <envoy_v3_api_field_extensions.filters.network.tcp_proxy.v3.TcpProxy.max_downstream_connection_duration>`.
   HTTP only
     * **DC**: Downstream connection termination.
     * **LH**: Local service failed :ref:`health check request <arch_overview_health_checking>` in addition to 503 response code.
@@ -274,20 +388,51 @@ The following command operators are supported:
       :ref:`strictly-checked header <envoy_v3_api_field_extensions.filters.http.router.v3.Router.strict_check_headers>` in addition to 400 response code.
     * **SI**: Stream idle timeout in addition to 408 response code.
     * **DPE**: The downstream request had an HTTP protocol error.
-    * **UMSDR**: The upstream request reached to max stream duration.
+    * **UPE**: The upstream response had an HTTP protocol error.
+    * **UMSDR**: The upstream request reached max stream duration.
+    * **OM**: Overload Manager terminated the request.
+    * **DF**: The request was terminated due to DNS resolution failure.
 
 %ROUTE_NAME%
   Name of the route.
+
+%VIRTUAL_CLUSTER_NAME%
+  HTTP*/gRPC
+    Name of the matched Virtual Cluster (if any).
+
+  TCP/UDP
+    Not implemented ("-")
 
 %UPSTREAM_HOST%
   Upstream host URL (e.g., tcp://ip:port for TCP connections).
 
 %UPSTREAM_CLUSTER%
-  Upstream cluster to which the upstream host belongs to.
+  Upstream cluster to which the upstream host belongs to. :ref:`alt_stat_name
+  <envoy_v3_api_field_config.cluster.v3.Cluster.alt_stat_name>` will be used if provided.
 
 %UPSTREAM_LOCAL_ADDRESS%
   Local address of the upstream connection. If the address is an IP address it includes both
   address and port.
+
+%UPSTREAM_LOCAL_ADDRESS_WITHOUT_PORT%
+  Local address of the upstream connection, without any port component.
+  IP addresses are the only address type with a port component.
+
+%UPSTREAM_LOCAL_PORT%
+  Local port of the upstream connection.
+  IP addresses are the only address type with a port component.
+
+%UPSTREAM_REMOTE_ADDRESS%
+  Remote address of the upstream connection. If the address is an IP address it includes both
+  address and port.
+
+%UPSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%
+  Remote address of the upstream connection, without any port component.
+  IP addresses are the only address type with a port component.
+
+%UPSTREAM_REMOTE_PORT%
+  Remote port of the upstream connection.
+  IP addresses are the only address type with a port component.
 
 .. _config_access_log_format_upstream_transport_failure_reason:
 
@@ -307,17 +452,27 @@ The following command operators are supported:
   .. note::
 
     This may not be the physical remote address of the peer if the address has been inferred from
-    :ref:`proxy proto <envoy_v3_api_field_config.listener.v3.FilterChain.use_proxy_proto>` or :ref:`x-forwarded-for
+    :ref:`Proxy Protocol filter <config_listener_filters_proxy_protocol>` or :ref:`x-forwarded-for
     <config_http_conn_man_headers_x-forwarded-for>`.
 
 %DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%
-  Remote address of the downstream connection. If the address is an IP address the output does
-  *not* include port.
+  Remote address of the downstream connection, without any port component.
+  IP addresses are the only address type with a port component.
 
   .. note::
 
     This may not be the physical remote address of the peer if the address has been inferred from
-    :ref:`proxy proto <envoy_v3_api_field_config.listener.v3.FilterChain.use_proxy_proto>` or :ref:`x-forwarded-for
+    :ref:`Proxy Protocol filter <config_listener_filters_proxy_protocol>` or :ref:`x-forwarded-for
+    <config_http_conn_man_headers_x-forwarded-for>`.
+
+%DOWNSTREAM_REMOTE_PORT%
+  Remote port of the downstream connection.
+  IP addresses are the only address type with a port component.
+
+  .. note::
+
+    This may not be the physical remote address of the peer if the address has been inferred from
+    :ref:`Proxy Protocol filter <config_listener_filters_proxy_protocol>` or :ref:`x-forwarded-for
     <config_http_conn_man_headers_x-forwarded-for>`.
 
 %DOWNSTREAM_DIRECT_REMOTE_ADDRESS%
@@ -327,22 +482,33 @@ The following command operators are supported:
   .. note::
 
     This is always the physical remote address of the peer even if the downstream remote address has
-    been inferred from :ref:`proxy proto <envoy_v3_api_field_config.listener.v3.FilterChain.use_proxy_proto>`
+    been inferred from :ref:`Proxy Protocol filter <config_listener_filters_proxy_protocol>`
     or :ref:`x-forwarded-for <config_http_conn_man_headers_x-forwarded-for>`.
 
 %DOWNSTREAM_DIRECT_REMOTE_ADDRESS_WITHOUT_PORT%
-  The direct remote address of the downstream connection. If the address is an IP address the output does
-  *not* include port.
+  Direct remote address of the downstream connection, without any port component.
+  IP addresses are the only address type with a port component.
 
   .. note::
 
     This is always the physical remote address of the peer even if the downstream remote address has
-    been inferred from :ref:`proxy proto <envoy_v3_api_field_config.listener.v3.FilterChain.use_proxy_proto>`
+    been inferred from :ref:`Proxy Protocol filter <config_listener_filters_proxy_protocol>`
+    or :ref:`x-forwarded-for <config_http_conn_man_headers_x-forwarded-for>`.
+
+%DOWNSTREAM_DIRECT_REMOTE_PORT%
+  Direct remote port of the downstream connection.
+  IP addresses are the only address type with a port component.
+
+  .. note::
+
+    This is always the physical remote address of the peer even if the downstream remote address has
+    been inferred from :ref:`Proxy Protocol filter <config_listener_filters_proxy_protocol>`
     or :ref:`x-forwarded-for <config_http_conn_man_headers_x-forwarded-for>`.
 
 %DOWNSTREAM_LOCAL_ADDRESS%
   Local address of the downstream connection. If the address is an IP address it includes both
   address and port.
+
   If the original connection was redirected by iptables REDIRECT, this represents
   the original destination address restored by the
   :ref:`Original Destination Filter <config_listener_filters_original_dst>` using SO_ORIGINAL_DST socket option.
@@ -350,13 +516,26 @@ The following command operators are supported:
   option was set to true, this represents the original destination address and port.
 
 %DOWNSTREAM_LOCAL_ADDRESS_WITHOUT_PORT%
-    Same as **%DOWNSTREAM_LOCAL_ADDRESS%** excluding port if the address is an IP address.
+  Local address of the downstream connection, without any port component.
+  IP addresses are the only address type with a port component.
+
+%DOWNSTREAM_LOCAL_PORT%
+  Local port of the downstream connection.
+  IP addresses are the only address type with a port component.
+
+.. _config_access_log_format_connection_id:
+
+%CONNECTION_ID%
+  An identifier for the downstream connection. It can be used to
+  cross-reference TCP access logs across multiple log sinks, or to
+  cross-reference timer-based reports for the same connection. The identifier
+  is unique with high likelihood within an execution, but can duplicate across
+  multiple instances or between restarts.
 
 %GRPC_STATUS%
   gRPC status code which is easy to interpret with text message corresponding with number.
 
-%DOWNSTREAM_LOCAL_PORT%
-    Similar to **%DOWNSTREAM_LOCAL_ADDRESS_WITHOUT_PORT%**, but only extracts the port portion of the **%DOWNSTREAM_LOCAL_ADDRESS%**
+.. _config_access_log_format_req:
 
 %REQ(X?Y):Z%
   HTTP
@@ -382,21 +561,23 @@ The following command operators are supported:
   TCP
     Not implemented ("-").
 
+.. _config_access_log_format_dynamic_metadata:
+
 %DYNAMIC_METADATA(NAMESPACE:KEY*):Z%
   HTTP
     :ref:`Dynamic Metadata <envoy_v3_api_msg_config.core.v3.Metadata>` info,
     where NAMESPACE is the filter namespace used when setting the metadata, KEY is an optional
-    lookup up key in the namespace with the option of specifying nested keys separated by ':',
+    lookup key in the namespace with the option of specifying nested keys separated by ':',
     and Z is an optional parameter denoting string truncation up to Z characters long. Dynamic Metadata
-    can be set by filters using the :repo:`StreamInfo <include/envoy/stream_info/stream_info.h>` API:
+    can be set by filters using the :repo:`StreamInfo <envoy/stream_info/stream_info.h>` API:
     *setDynamicMetadata*. The data will be logged as a JSON string. For example, for the following dynamic metadata:
 
     ``com.test.my_filter: {"test_key": "foo", "test_object": {"inner_key": "bar"}}``
 
     * %DYNAMIC_METADATA(com.test.my_filter)% will log: ``{"test_key": "foo", "test_object": {"inner_key": "bar"}}``
-    * %DYNAMIC_METADATA(com.test.my_filter:test_key)% will log: ``"foo"``
+    * %DYNAMIC_METADATA(com.test.my_filter:test_key)% will log: ``foo``
     * %DYNAMIC_METADATA(com.test.my_filter:test_object)% will log: ``{"inner_key": "bar"}``
-    * %DYNAMIC_METADATA(com.test.my_filter:test_object:inner_key)% will log: ``"bar"``
+    * %DYNAMIC_METADATA(com.test.my_filter:test_object:inner_key)% will log: ``bar``
     * %DYNAMIC_METADATA(com.unknown_filter)% will log: ``-``
     * %DYNAMIC_METADATA(com.test.my_filter:unknown_key)% will log: ``-``
     * %DYNAMIC_METADATA(com.test.my_filter):25% will log (truncation at 25 characters): ``{"test_key": "foo", "test``
@@ -409,7 +590,45 @@ The following command operators are supported:
     For typed JSON logs, this operator renders a single value with string, numeric, or boolean type
     when the referenced key is a simple value. If the referenced key is a struct or list value, a
     JSON struct or list is rendered. Structs and lists may be nested. In any event, the maximum
-    length is ignored
+    length is ignored.
+
+  .. note::
+
+   DYNAMIC_METADATA command operator will be deprecated in the future in favor of :ref:`METADATA<envoy_v3_api_msg_extensions.formatter.metadata.v3.Metadata>` operator.
+
+.. _config_access_log_format_cluster_metadata:
+
+%CLUSTER_METADATA(NAMESPACE:KEY*):Z%
+  HTTP
+    :ref:`Upstream cluster Metadata <envoy_v3_api_msg_config.core.v3.Metadata>` info,
+    where NAMESPACE is the filter namespace used when setting the metadata, KEY is an optional
+    lookup key in the namespace with the option of specifying nested keys separated by ':',
+    and Z is an optional parameter denoting string truncation up to Z characters long. The data
+    will be logged as a JSON string. For example, for the following dynamic metadata:
+
+    ``com.test.my_filter: {"test_key": "foo", "test_object": {"inner_key": "bar"}}``
+
+    * %CLUSTER_METADATA(com.test.my_filter)% will log: ``{"test_key": "foo", "test_object": {"inner_key": "bar"}}``
+    * %CLUSTER_METADATA(com.test.my_filter:test_key)% will log: ``foo``
+    * %CLUSTER_METADATA(com.test.my_filter:test_object)% will log: ``{"inner_key": "bar"}``
+    * %CLUSTER_METADATA(com.test.my_filter:test_object:inner_key)% will log: ``bar``
+    * %CLUSTER_METADATA(com.unknown_filter)% will log: ``-``
+    * %CLUSTER_METADATA(com.test.my_filter:unknown_key)% will log: ``-``
+    * %CLUSTER_METADATA(com.test.my_filter):25% will log (truncation at 25 characters): ``{"test_key": "foo", "test``
+
+  TCP
+    Not implemented ("-").
+
+  .. note::
+
+    For typed JSON logs, this operator renders a single value with string, numeric, or boolean type
+    when the referenced key is a simple value. If the referenced key is a struct or list value, a
+    JSON struct or list is rendered. Structs and lists may be nested. In any event, the maximum
+    length is ignored.
+
+  .. note::
+
+   CLUSTER_METADATA command operator will be deprecated in the future in favor of :ref:`METADATA<envoy_v3_api_msg_extensions.formatter.metadata.v3.Metadata>` operator.
 
 .. _config_access_log_format_filter_state:
 
@@ -419,8 +638,8 @@ The following command operators are supported:
     look up the filter state object. The serialized proto will be logged as JSON string if possible.
     If the serialized proto is unknown to Envoy it will be logged as protobuf debug string.
     Z is an optional parameter denoting string truncation up to Z characters long.
-    F is an optional parameter used to indicate which method FilterState uses for serialization. 
-    If 'PLAIN' is set, the filter state object will be serialized as an unstructured string. 
+    F is an optional parameter used to indicate which method FilterState uses for serialization.
+    If 'PLAIN' is set, the filter state object will be serialized as an unstructured string.
     If 'TYPED' is set or no F provided, the filter state object will be serialized as an JSON string.
 
   TCP
@@ -493,6 +712,12 @@ The following command operators are supported:
   TCP
     The hex-encoded SHA256 fingerprint of the client certificate used to establish the downstream TLS connection.
 
+%DOWNSTREAM_PEER_FINGERPRINT_1%
+  HTTP
+    The hex-encoded SHA1 fingerprint of the client certificate used to establish the downstream TLS connection.
+  TCP
+    The hex-encoded SHA1 fingerprint of the client certificate used to establish the downstream TLS connection.
+
 %DOWNSTREAM_PEER_SERIAL%
   HTTP
     The serial number of the client certificate used to establish the downstream TLS connection.
@@ -505,11 +730,18 @@ The following command operators are supported:
   TCP
     The client certificate in the URL-encoded PEM format used to establish the downstream TLS connection.
 
+.. _config_access_log_format_downstream_peer_cert_v_start:
+
 %DOWNSTREAM_PEER_CERT_V_START%
   HTTP
     The validity start date of the client certificate used to establish the downstream TLS connection.
   TCP
     The validity start date of the client certificate used to establish the downstream TLS connection.
+
+  DOWNSTREAM_PEER_CERT_V_START can be customized using a `format string <https://en.cppreference.com/w/cpp/io/manip/put_time>`_.
+  See :ref:`START_TIME <config_access_log_format_start_time>` for additional format specifiers and examples.
+
+.. _config_access_log_format_downstream_peer_cert_v_end:
 
 %DOWNSTREAM_PEER_CERT_V_END%
   HTTP
@@ -517,5 +749,14 @@ The following command operators are supported:
   TCP
     The validity end date of the client certificate used to establish the downstream TLS connection.
 
+  DOWNSTREAM_PEER_CERT_V_END can be customized using a `format string <https://en.cppreference.com/w/cpp/io/manip/put_time>`_.
+  See :ref:`START_TIME <config_access_log_format_start_time>` for additional format specifiers and examples.
+
 %HOSTNAME%
   The system hostname.
+
+%LOCAL_REPLY_BODY%
+  The body text for the requests rejected by the Envoy.
+
+%FILTER_CHAIN_NAME%
+  The network filter chain name of the downstream connection.

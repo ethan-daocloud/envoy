@@ -7,8 +7,15 @@ This HTTP filter can be used to verify JSON Web Token (JWT). It will verify its 
 
 JWKS is needed to verify JWT signatures. They can be specified in the filter config or can be fetched remotely from a JWKS server.
 
-.. attention::
-   ES256, ES384, ES512, HS256, HS384, HS512, RS256, RS384 and RS512 are supported for the JWT alg.
+Following are supported JWT alg:
+
+.. code-block::
+
+   ES256, ES384, ES512,
+   HS256, HS384, HS512,
+   RS256, RS384, RS512,
+   PS256, PS384, PS512,
+   EdDSA
 
 Configuration
 -------------
@@ -33,18 +40,22 @@ JwtProvider
 * *forward*: if true, JWT will be forwarded to the upstream.
 * *from_headers*: extract JWT from HTTP headers.
 * *from_params*: extract JWT from query parameters.
+* *from_cookies*: extract JWT from HTTP request cookies.
 * *forward_payload_header*: forward the JWT payload in the specified HTTP header.
+* *jwt_cache_config*: Enables JWT cache, its size can be specified by *jwt_cache_size*. Only valid JWT tokens are cached.
 
 Default Extract Location
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-If *from_headers* and *from_params* is empty,  the default location to extract JWT is from HTTP header::
+If *from_headers* and *from_params* is empty, the default location to extract JWT is from HTTP header::
 
   Authorization: Bearer <token>
 
-If fails to extract a JWT from above header, then check query parameter key *access_token* as in this example::
+and query parameter key *access_token* as::
 
   /path?access_token=<JWT>
+
+If a request has two tokens, one from the header and the other from the query parameter, all of them must be valid.
 
 In the :ref:`filter config <envoy_v3_api_msg_extensions.filters.http.jwt_authn.v3.JwtAuthentication>`, *providers* is a map, to map *provider_name* to a :ref:`JwtProvider <envoy_v3_api_msg_extensions.filters.http.jwt_authn.v3.JwtProvider>`. The *provider_name* must be unique, it is referred in the `JwtRequirement <envoy_v3_api_msg_extensions.filters.http.jwt_authn.v3.JwtRequirement>` in its *provider_name* field.
 
@@ -68,10 +79,11 @@ Remote JWKS config example
         http_uri:
           uri: https://example.com/jwks.json
           cluster: example_jwks_cluster
+          timeout: 1s
         cache_duration:
           seconds: 300
 
-Above example fetches JWSK from a remote server with URL https://example.com/jwks.json. The token will be extracted from the default extract locations. The token will not be forwarded to upstream. JWT payload will not be added to the request header.
+Above example fetches JWKS from a remote server with URL https://example.com/jwks.json. The token will be extracted from the default extract locations. The token will not be forwarded to upstream. JWT payload will not be added to the request header.
 
 Following cluster **example_jwks_cluster** is needed to fetch JWKS.
 
@@ -88,7 +100,9 @@ Following cluster **example_jwks_cluster** is needed to fetch JWKS.
             address:
               socket_address:
                 address: example.com
-                port_value: 80
+                port_value: 443
+    transport_socket:
+      name: envoy.transport_sockets.tls
 
 
 Inline JWKS config example

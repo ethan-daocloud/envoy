@@ -1,3 +1,5 @@
+#pragma once
+
 #include <memory>
 
 #include "envoy/admin/v3/config_dump.pb.h"
@@ -5,14 +7,18 @@
 #include "envoy/config/listener/v3/listener.pb.h"
 #include "envoy/config/listener/v3/listener_components.pb.h"
 
-#include "common/network/listen_socket_impl.h"
-#include "common/network/socket_option_impl.h"
-
-#include "server/configuration_impl.h"
-#include "server/listener_manager_impl.h"
+#include "source/common/network/listen_socket_impl.h"
+#include "source/common/network/socket_option_impl.h"
+#include "source/server/configuration_impl.h"
+#include "source/server/listener_manager_impl.h"
 
 #include "test/mocks/network/mocks.h"
-#include "test/mocks/server/mocks.h"
+#include "test/mocks/server/drain_manager.h"
+#include "test/mocks/server/guard_dog.h"
+#include "test/mocks/server/instance.h"
+#include "test/mocks/server/listener_component_factory.h"
+#include "test/mocks/server/worker.h"
+#include "test/mocks/server/worker_factory.h"
 #include "test/test_common/environment.h"
 #include "test/test_common/simulated_time_system.h"
 #include "test/test_common/test_runtime.h"
@@ -47,14 +53,29 @@ public:
 };
 
 class ListenerManagerImplTest : public testing::Test {
+public:
+  // reuse_port is the default on Linux for TCP. On other platforms even if set it is disabled
+  // and the user is warned. For UDP it's always the default even if not effective.
+  static constexpr ListenerComponentFactory::BindType default_bind_type =
+#ifdef __linux__
+      ListenerComponentFactory::BindType::ReusePort;
+#else
+      ListenerComponentFactory::BindType::NoReusePort;
+#endif
+
 protected:
-  ListenerManagerImplTest() : api_(Api::createApiForTest()) {}
+  ListenerManagerImplTest() : api_(Api::createApiForTest(server_.api_.random_)) {}
 
   void SetUp() override {
     ON_CALL(server_, api()).WillByDefault(ReturnRef(*api_));
     EXPECT_CALL(worker_factory_, createWorker_()).WillOnce(Return(worker_));
-    manager_ = std::make_unique<ListenerManagerImpl>(server_, listener_factory_, worker_factory_,
-                                                     enable_dispatcher_stats_);
+    ON_CALL(server_.validation_context_, staticValidationVisitor())
+        .WillByDefault(ReturnRef(validation_visitor));
+    ON_CALL(server_.validation_context_, dynamicValidationVisitor())
+        .WillByDefault(ReturnRef(validation_visitor));
+    manager_ =
+        std::make_unique<ListenerManagerImpl>(server_, listener_factory_, worker_factory_,
+                                              enable_dispatcher_stats_, server_.quic_stat_names_);
 
     // Use real filter loading by default.
     ON_CALL(listener_factory_, createNetworkFilterFactoryList(_, _))
@@ -165,14 +186,15 @@ protected:
   findFilterChain(uint16_t destination_port, const std::string& destination_address,
                   const std::string& server_name, const std::string& transport_protocol,
                   const std::vector<std::string>& application_protocols,
-                  const std::string& source_address, uint16_t source_port) {
+                  const std::string& source_address, uint16_t source_port,
+                  std::string direct_source_address = "") {
     if (absl::StartsWith(destination_address, "/")) {
       local_address_ = std::make_shared<Network::Address::PipeInstance>(destination_address);
     } else {
       local_address_ =
           Network::Utility::parseInternetAddress(destination_address, destination_port);
     }
-    ON_CALL(*socket_, localAddress()).WillByDefault(ReturnRef(local_address_));
+    socket_->connection_info_provider_->setLocalAddress(local_address_);
 
     ON_CALL(*socket_, requestedServerName()).WillByDefault(Return(absl::string_view(server_name)));
     ON_CALL(*socket_, detectedTransportProtocol())
@@ -185,7 +207,19 @@ protected:
     } else {
       remote_address_ = Network::Utility::parseInternetAddress(source_address, source_port);
     }
-    ON_CALL(*socket_, remoteAddress()).WillByDefault(ReturnRef(remote_address_));
+    socket_->connection_info_provider_->setRemoteAddress(remote_address_);
+
+    if (direct_source_address.empty()) {
+      direct_source_address = source_address;
+    }
+    if (absl::StartsWith(direct_source_address, "/")) {
+      direct_remote_address_ =
+          std::make_shared<Network::Address::PipeInstance>(direct_source_address);
+    } else {
+      direct_remote_address_ =
+          Network::Utility::parseInternetAddress(direct_source_address, source_port);
+    }
+    socket_->connection_info_provider_->setDirectRemoteAddressForTest(direct_remote_address_);
 
     return manager_->listeners().back().get().filterChainManager().findFilterChain(*socket_);
   }
@@ -196,34 +230,36 @@ protected:
   void
   expectCreateListenSocket(const envoy::config::core::v3::SocketOption::SocketState& expected_state,
                            Network::Socket::Options::size_type expected_num_options,
-                           ListenSocketCreationParams expected_creation_params = {true, true}) {
-    EXPECT_CALL(listener_factory_, createListenSocket(_, _, _, expected_creation_params))
-        .WillOnce(Invoke([this, expected_num_options, &expected_state](
-                             const Network::Address::InstanceConstSharedPtr&,
-                             Network::Address::SocketType,
-                             const Network::Socket::OptionsSharedPtr& options,
-                             const ListenSocketCreationParams&) -> Network::SocketSharedPtr {
-          EXPECT_NE(options.get(), nullptr);
-          EXPECT_EQ(options->size(), expected_num_options);
-          EXPECT_TRUE(
-              Network::Socket::applyOptions(options, *listener_factory_.socket_, expected_state));
-          return listener_factory_.socket_;
-        }));
+                           ListenerComponentFactory::BindType bind_type = default_bind_type,
+                           uint32_t worker_index = 0) {
+    EXPECT_CALL(listener_factory_, createListenSocket(_, _, _, bind_type, _, worker_index))
+        .WillOnce(
+            Invoke([this, expected_num_options, &expected_state](
+                       const Network::Address::InstanceConstSharedPtr&, Network::Socket::Type,
+                       const Network::Socket::OptionsSharedPtr& options,
+                       ListenerComponentFactory::BindType, const Network::SocketCreationOptions&,
+                       uint32_t) -> Network::SocketSharedPtr {
+              EXPECT_NE(options.get(), nullptr);
+              EXPECT_EQ(options->size(), expected_num_options);
+              EXPECT_TRUE(Network::Socket::applyOptions(options, *listener_factory_.socket_,
+                                                        expected_state));
+              return listener_factory_.socket_;
+            }));
   }
 
   /**
-   * Validate that setsockopt() is called the expected number of times with the expected options.
+   * Validate that setSocketOption() is called the expected number of times with the expected
+   * options.
    */
-  void expectSetsockopt(NiceMock<Api::MockOsSysCalls>& os_sys_calls, int expected_sockopt_level,
-                        int expected_sockopt_name, int expected_value,
+  void expectSetsockopt(int expected_sockopt_level, int expected_sockopt_name, int expected_value,
                         uint32_t expected_num_calls = 1) {
-    EXPECT_CALL(os_sys_calls,
-                setsockopt_(_, expected_sockopt_level, expected_sockopt_name, _, sizeof(int)))
+    EXPECT_CALL(*listener_factory_.socket_,
+                setSocketOption(expected_sockopt_level, expected_sockopt_name, _, sizeof(int)))
         .Times(expected_num_calls)
-        .WillRepeatedly(
-            Invoke([expected_value](os_fd_t, int, int, const void* optval, socklen_t) -> int {
+        .WillRepeatedly(Invoke(
+            [expected_value](int, int, const void* optval, socklen_t) -> Api::SysCallIntResult {
               EXPECT_EQ(expected_value, *static_cast<const int*>(optval));
-              return 0;
+              return {0, 0};
             }));
   }
 
@@ -253,8 +289,11 @@ protected:
                                           .value());
   }
 
-  void checkConfigDump(const std::string& expected_dump_yaml) {
-    auto message_ptr = server_.admin_.config_tracker_.config_tracker_callbacks_["listeners"]();
+  void checkConfigDump(
+      const std::string& expected_dump_yaml,
+      const Matchers::StringMatcher& name_matcher = Matchers::UniversalStringMatcher()) {
+    auto message_ptr =
+        server_.admin_.config_tracker_.config_tracker_callbacks_["listeners"](name_matcher);
     const auto& listeners_config_dump =
         dynamic_cast<const envoy::admin::v3::ListenersConfigDump&>(*message_ptr);
 
@@ -263,19 +302,12 @@ protected:
     EXPECT_EQ(expected_listeners_config_dump.DebugString(), listeners_config_dump.DebugString());
   }
 
-  ABSL_MUST_USE_RESULT
-  auto disableInplaceUpdateForThisTest() {
-    auto scoped_runtime = std::make_unique<TestScopedRuntime>();
-    Runtime::LoaderSingleton::getExisting()->mergeValues(
-        {{"envoy.reloadable_features.listener_in_place_filterchain_update", "false"}});
-    return scoped_runtime;
-  }
-
   NiceMock<Api::MockOsSysCalls> os_sys_calls_;
   TestThreadsafeSingletonInjector<Api::OsSysCallsImpl> os_calls_{&os_sys_calls_};
   Api::OsSysCallsImpl os_sys_calls_actual_;
   NiceMock<MockInstance> server_;
   NiceMock<MockListenerComponentFactory> listener_factory_;
+  NiceMock<ProtobufMessage::MockValidationVisitor> validation_visitor;
   MockWorker* worker_ = new MockWorker();
   NiceMock<MockWorkerFactory> worker_factory_;
   std::unique_ptr<ListenerManagerImpl> manager_;
@@ -284,9 +316,11 @@ protected:
   Api::ApiPtr api_;
   Network::Address::InstanceConstSharedPtr local_address_;
   Network::Address::InstanceConstSharedPtr remote_address_;
+  Network::Address::InstanceConstSharedPtr direct_remote_address_;
   std::unique_ptr<Network::MockConnectionSocket> socket_;
   uint64_t listener_tag_{1};
   bool enable_dispatcher_stats_{false};
+  NiceMock<testing::MockFunction<void()>> callback_;
 };
 
 } // namespace Server

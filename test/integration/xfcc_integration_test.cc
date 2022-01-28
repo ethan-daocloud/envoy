@@ -2,25 +2,25 @@
 
 #include <memory>
 #include <regex>
-#include <unordered_map>
 
 #include "envoy/config/bootstrap/v3/bootstrap.pb.h"
 #include "envoy/extensions/filters/network/http_connection_manager/v3/http_connection_manager.pb.h"
 #include "envoy/extensions/transport_sockets/tls/v3/cert.pb.h"
+#include "envoy/extensions/transport_sockets/tls/v3/common.pb.h"
 #include "envoy/stats/scope.h"
 
-#include "common/event/dispatcher_impl.h"
-#include "common/http/header_map_impl.h"
-#include "common/network/utility.h"
-
-#include "extensions/transport_sockets/tls/context_config_impl.h"
-#include "extensions/transport_sockets/tls/context_manager_impl.h"
-#include "extensions/transport_sockets/tls/ssl_socket.h"
+#include "source/common/event/dispatcher_impl.h"
+#include "source/common/http/header_map_impl.h"
+#include "source/common/network/utility.h"
+#include "source/extensions/transport_sockets/tls/context_config_impl.h"
+#include "source/extensions/transport_sockets/tls/context_manager_impl.h"
+#include "source/extensions/transport_sockets/tls/ssl_socket.h"
 
 #include "test/test_common/network_utility.h"
 #include "test/test_common/printers.h"
 #include "test/test_common/utility.h"
 
+#include "absl/container/node_hash_map.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "integration.h"
@@ -46,10 +46,16 @@ common_tls_context:
   validation_context:
     trusted_ca:
       filename: {{ test_rundir }}/test/config/integration/certs/cacert.pem
-    match_subject_alt_names: 
-      exact: "spiffe://lyft.com/backend-team"
-      exact: "lyft.com"
-      exact: "www.lyft.com"
+    match_typed_subject_alt_names:
+    - san_type: URI
+      matcher:
+        exact: "spiffe://lyft.com/backend-team"
+    - san_type: DNS
+      matcher:
+        exact: "lyft.com"
+    - san_type: DNS
+      matcher:
+        exact: "www.lyft.com"
 )EOF";
 
   const std::string yaml_mtls = R"EOF(
@@ -57,10 +63,16 @@ common_tls_context:
   validation_context:
     trusted_ca:
       filename: {{ test_rundir }}/test/config/integration/certs/cacert.pem
-    match_subject_alt_names: 
-      exact: "spiffe://lyft.com/backend-team"
-      exact: "lyft.com"
-      exact: "www.lyft.com"
+    match_typed_subject_alt_names:
+    - san_type: URI
+      matcher:
+        exact: "spiffe://lyft.com/backend-team"
+    - san_type: DNS
+      matcher:
+        exact: "lyft.com"
+    - san_type: DNS
+      matcher:
+       exact: "www.lyft.com"
   tls_certificates:
     certificate_chain:
       filename: {{ test_rundir }}/test/config/integration/certs/clientcert.pem
@@ -118,8 +130,7 @@ Network::ClientConnectionPtr XfccIntegrationTest::makeMtlsClientConnection() {
 }
 
 void XfccIntegrationTest::createUpstreams() {
-  fake_upstreams_.emplace_back(new FakeUpstream(
-      createUpstreamSslContext(), 0, FakeHttpConnection::Type::HTTP1, version_, timeSystem()));
+  addFakeUpstream(createUpstreamSslContext(), Http::CodecType::HTTP1);
 }
 
 void XfccIntegrationTest::initialize() {
@@ -137,7 +148,10 @@ void XfccIntegrationTest::initialize() {
     auto* validation_context = context.mutable_common_tls_context()->mutable_validation_context();
     validation_context->mutable_trusted_ca()->set_filename(
         TestEnvironment::runfilesPath("test/config/integration/certs/upstreamcacert.pem"));
-    validation_context->add_match_subject_alt_names()->set_suffix("lyft.com");
+    auto* san_matcher = validation_context->add_match_typed_subject_alt_names();
+    san_matcher->mutable_matcher()->set_suffix("lyft.com");
+    san_matcher->set_san_type(
+        envoy::extensions::transport_sockets::tls::v3::SubjectAltNameMatcher::DNS);
     transport_socket->set_name("envoy.transport_sockets.tls");
     transport_socket->mutable_typed_config()->PackFrom(context);
   });
@@ -178,11 +192,10 @@ void XfccIntegrationTest::testRequestAndResponseWithXfccHeader(std::string previ
   if (expected_xfcc.empty()) {
     EXPECT_EQ(nullptr, upstream_request_->headers().ForwardedClientCert());
   } else {
-    EXPECT_EQ(expected_xfcc,
-              upstream_request_->headers().ForwardedClientCert()->value().getStringView());
+    EXPECT_EQ(expected_xfcc, upstream_request_->headers().getForwardedClientCertValue());
   }
   upstream_request_->encodeHeaders(Http::TestResponseHeaderMapImpl{{":status", "200"}}, true);
-  response->waitForEndStream();
+  ASSERT_TRUE(response->waitForEndStream());
   EXPECT_TRUE(upstream_request_->complete());
   EXPECT_TRUE(response->complete());
 }
@@ -430,8 +443,8 @@ TEST_P(XfccIntegrationTest, TagExtractedNameGenerationTest) {
   // }
   // std::cout << "};" << std::endl;
 
-  std::unordered_map<std::string, std::string> tag_extracted_counter_map;
-  std::unordered_map<std::string, std::string> tag_extracted_gauge_map;
+  absl::node_hash_map<std::string, std::string> tag_extracted_counter_map;
+  absl::node_hash_map<std::string, std::string> tag_extracted_gauge_map;
 
   tag_extracted_counter_map = {
       {listenerStatPrefix("downstream_cx_total"), "listener.downstream_cx_total"},
@@ -746,10 +759,12 @@ TEST_P(XfccIntegrationTest, TagExtractedNameGenerationTest) {
       {"server.parent_connections", "server.parent_connections"},
       {"server.total_connections", "server.total_connections"},
       {"server.days_until_first_cert_expiring", "server.days_until_first_cert_expiring"},
+      {"server.seconds_until_first_ocsp_response_expiring",
+       "server.seconds_until_first_ocsp_response_expiring"},
       {"server.version", "server.version"}};
 
   auto test_name_against_mapping =
-      [](const std::unordered_map<std::string, std::string>& extracted_name_map,
+      [](const absl::node_hash_map<std::string, std::string>& extracted_name_map,
          const Stats::Metric& metric) {
         auto it = extracted_name_map.find(metric.name());
         // Ignore any metrics that are not found in the map for ease of addition

@@ -7,11 +7,14 @@
 #       "owner": "envoyproxy/api-shepherds!",
 #       "path": "api/",
 #       "label": "api",
+#       "allow_global_approval": True,
+#       "github_status_label": "any API change",
+#       "auto_assign": True,
 #     },
 #   ],
 # )
 #
-# This module will maintain a commit status per specified path (also aka as spec).
+# This module will maintain a commit status per specified path regex (also aka as spec).
 #
 # Two types of approvals:
 # 1. Global approvals, done by approving the PR using Github's review approval feature.
@@ -19,7 +22,19 @@
 #    associated with the path. This does not affect GitHub's PR approve status, only
 #    this module's maintained commit status. This approval is automatically revoked
 #    if any further changes are done to the relevant files in this spec.
+#
+# By default, 'allow_global_approval' is true and either (1) or (2) above can unblock
+# merges. If 'allow_global_approval' is set false, then only (2) will unblock a merge.
+#
+# 'label' refers to a GitHub label applied to any matching PR. The GitHub check status
+# can be customized with `github_status_label`.
+#
+# If 'auto_assign' is set True, a randomly selected reviwer from the owner team will
+# be selected and set as a reviewer on the PR if there is not already a member of the
+# owner team set as reviewer or assignee for the PR.
 
+load("text", "match")
+load("random", "randint")
 load("github.com/repokitteh/modules/lib/utils.star", "react")
 
 def _store_partial_approval(who, files):
@@ -44,11 +59,19 @@ def _get_relevant_specs(specs, changed_files):
   relevant = []
 
   for spec in specs:
-    prefix = spec["path"]
+    path_match = spec["path"]
 
-    files = [f for f in changed_files if f['filename'].startswith(prefix)]
+    files = [f for f in changed_files if match(path_match, f['filename'])]
+    allow_global_approval = spec.get("allow_global_approval", True)
+    status_label = spec.get("github_status_label", "")
     if files:
-      relevant.append(struct(files=files, prefix=prefix, **spec))
+      relevant.append(struct(files=files,
+                             owner=spec["owner"],
+                             label=spec.get("label", None),
+                             path_match=path_match,
+                             allow_global_approval=allow_global_approval,
+                             status_label=status_label,
+                             auto_assign=spec.get("auto_assign", False)))
 
   print("specs: %s" % relevant)
 
@@ -81,7 +104,7 @@ def _is_approved(spec, approvers):
     print("team %s(%d) = %s" % (team_name, team_id, required))
 
   for r in required:
-    if any([a for a in approvers if a == r]):
+    if spec.allow_global_approval and any([a for a in approvers if a == r]):
       print("global approver: %s" % r)
       return True
 
@@ -92,11 +115,12 @@ def _is_approved(spec, approvers):
   return False
 
 
-def _update_status(owner, prefix, approved):
+def _update_status(owner, status_label, path_match, approved):
+  changes_to = path_match or '/'
   github.create_status(
     state=approved and 'success' or 'pending',
-    context='%s must approve' % owner,
-    description='changes to %s' % (prefix or '/'),
+    context='%s must approve for %s' % (owner, status_label),
+    description='changes to %s' % changes_to,
   )
 
 def _get_specs(config):
@@ -122,41 +146,40 @@ def _reconcile(config, specs=None):
     results.append((spec, approved))
 
     if spec.owner[-1] == '!':
-      _update_status(spec.owner[:-1], spec.prefix, approved)
+      _update_status(spec.owner[:-1], spec.status_label, spec.path_match, approved)
 
-      if hasattr(spec, 'label'):
+      if spec.label:
         if approved:
           github.issue_unlabel(spec.label)
         else:
           github.issue_label(spec.label)
-    elif hasattr(spec, 'label'): # fyis
+    elif spec.label: # fyis
       github.issue_label(spec.label)
 
   return results
 
 
-def _comment(config, results, force=False):
+def _comment(config, results, assignees, sender, force=False):
   lines = []
 
   for spec, approved in results:
     if approved:
       continue
 
-    mention = spec.owner
+    owner = spec.owner
 
-    if mention[0] != '@':
-      mention = '@' + mention
+    if owner[-1] == '!':
+      owner = owner[:-1]
 
-    if mention[-1] == '!':
-      mention = mention[:-1]
+    mention = '@' + owner
 
-    prefix = spec.prefix
-    if prefix:
-      prefix = ' for changes made to `' + prefix + '`'
+    match_description = spec.path_match
+    if match_description:
+      match_description = ' for changes made to `' + match_description + '`'
 
     mode = spec.owner[-1] == '!' and 'approval' or 'fyi'
 
-    key = "ownerscheck/%s/%s" % (spec.owner, spec.prefix)
+    key = "ownerscheck/%s/%s" % (spec.owner, spec.path_match)
 
     if (not force) and (store_get(key) == mode):
       mode = 'skip'
@@ -164,25 +187,61 @@ def _comment(config, results, force=False):
       store_put(key, mode)
 
     if mode == 'approval':
-      lines.append('CC %s: Your approval is needed%s.' % (mention, prefix))
+      lines.append('CC %s: Your approval is needed%s.' % (mention, match_description))
     elif mode == 'fyi':
-      lines.append('CC %s: FYI only%s.' % (mention, prefix))
+      lines.append('CC %s: FYI only%s.' % (mention, match_description))
+
+    if mode != 'skip' and spec.auto_assign:
+      assigned = _assign_from_team(owner, assignees, [sender])
+      lines.append('%s assignee is @%s' % (owner, assigned))
 
   if lines:
     github.issue_create_comment('\n'.join(lines))
 
 
-def _reconcile_and_comment(config):
-  _comment(config, _reconcile(config))
+def _assign_from_team(team_name, assignees, exclude_users):
+  if '/' not in team_name:
+    return None
+  assigned = None
+  # Find owners via github.team_get_by_name, github.team_list_members
+  team_slug = team_name.split('/')[1]
+  team = github.team_get_by_name(team_slug, success_codes=[200, 404])
+  if not team:
+    return None
+  members = [m['login'] for m in github.team_list_members(team['id']) if m['login'] not in exclude_users]
+  # Is a team member already assigned? The first assigned team member is picked. Bad O(n^2) as
+  # Starlark doesn't have sets, n is small.
+  for assignee in assignees:
+    if assignee in members:
+      assigned = assignee
+      break
+  # Otherwise, pick at random.
+  if not assigned:
+    assigned = members[randint(len(members))]
+  github.issue_assign(assigned)
+  return assigned
 
 
-def _force_reconcile_and_comment(config):
-  _comment(config, _reconcile(config), force=True)
+def _assign_from(command, assignees):
+  lines = []
+  for team_name in command.args:
+    assigned = _assign_from_team(team_name, assignees, [])
+    lines.append('%s assignee is @%s' % (team_name, assigned))
+  if lines:
+    github.issue_create_comment('\n'.join(lines))
 
 
-def _pr(action, config):
+def _reconcile_and_comment(config, assignees, sender):
+  _comment(config, _reconcile(config), assignees, sender)
+
+
+def _force_reconcile_and_comment(config, assignees, sender):
+  _comment(config, _reconcile(config), assignees, sender, force=True)
+
+
+def _pr(action, config, assignees, sender):
   if action in ['synchronize', 'opened']:
-    _reconcile_and_comment(config)
+    _reconcile_and_comment(config, assignees, sender)
 
 
 def _pr_review(action, review_state, config):
@@ -202,7 +261,7 @@ def _lgtm_by_comment(config, comment_id, command, sender, sha):
 
   label = labels[0]
 
-  specs = [s for s in _get_specs(config) if hasattr(s, 'label') and s.label == label]
+  specs = [s for s in _get_specs(config) if s.label and s.label == label]
 
   if len(specs) == 0:
     react(comment_id, 'no relevant owners for "%s"' % label)
@@ -222,3 +281,4 @@ handlers.pull_request_review(func=_pr_review)
 handlers.command(name='checkowners', func=_reconcile)
 handlers.command(name='checkowners!', func=_force_reconcile_and_comment)
 handlers.command(name='lgtm', func=_lgtm_by_comment)
+handlers.command(name='assign-from', func=_assign_from)

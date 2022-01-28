@@ -1,13 +1,12 @@
 #include "envoy/extensions/filters/http/grpc_stats/v3/config.pb.h"
 #include "envoy/extensions/filters/http/grpc_stats/v3/config.pb.validate.h"
 
-#include "common/grpc/common.h"
-
-#include "extensions/filters/http/grpc_stats/grpc_stats_filter.h"
+#include "source/common/grpc/common.h"
+#include "source/extensions/filters/http/grpc_stats/grpc_stats_filter.h"
 
 #include "test/common/buffer/utility.h"
 #include "test/common/stream_info/test_util.h"
-#include "test/mocks/server/mocks.h"
+#include "test/mocks/server/factory_context.h"
 #include "test/test_common/logging.h"
 
 #include "gmock/gmock.h"
@@ -64,7 +63,7 @@ protected:
 
   envoy::extensions::filters::http::grpc_stats::v3::FilterConfig config_;
   NiceMock<Server::Configuration::MockFactoryContext> context_;
-  std::shared_ptr<Http::StreamFilter> filter_;
+  Http::StreamFilterSharedPtr filter_;
   NiceMock<Http::MockStreamDecoderFilterCallbacks> decoder_callbacks_;
   NiceMock<StreamInfo::MockStreamInfo> stream_info_;
   NiceMock<Stats::MockIsolatedStatsStore> stats_store_;
@@ -80,8 +79,7 @@ TEST_F(GrpcStatsFilterConfigTest, StatsHttp2HeaderOnlyResponse) {
   EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter_->decodeHeaders(request_headers, true));
 
   Http::TestResponseHeaderMapImpl continue_headers{{":status", "100"}};
-  EXPECT_EQ(Http::FilterHeadersStatus::Continue,
-            filter_->encode100ContinueHeaders(continue_headers));
+  EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter_->encode1xxHeaders(continue_headers));
   Http::MetadataMap metadata_map{{"metadata", "metadata"}};
   EXPECT_EQ(Http::FilterMetadataStatus::Continue, filter_->encodeMetadata(metadata_map));
 
@@ -95,7 +93,7 @@ TEST_F(GrpcStatsFilterConfigTest, StatsHttp2HeaderOnlyResponse) {
                      ->statsScope()
                      .counterFromString("grpc.lyft.users.BadCompanions.GetBadCompanions.total")
                      .value());
-  EXPECT_FALSE(stream_info_.filterState()->hasDataWithName(HttpFilterNames::get().GrpcStats));
+  EXPECT_FALSE(stream_info_.filterState()->hasDataWithName("envoy.filters.http.grpc_stats"));
 }
 
 TEST_F(GrpcStatsFilterConfigTest, StatsHttp2NormalResponse) {
@@ -115,7 +113,7 @@ TEST_F(GrpcStatsFilterConfigTest, StatsHttp2NormalResponse) {
                      ->statsScope()
                      .counterFromString("grpc.lyft.users.BadCompanions.GetBadCompanions.total")
                      .value());
-  EXPECT_FALSE(stream_info_.filterState()->hasDataWithName(HttpFilterNames::get().GrpcStats));
+  EXPECT_FALSE(stream_info_.filterState()->hasDataWithName("envoy.filters.http.grpc_stats"));
 }
 
 TEST_F(GrpcStatsFilterConfigTest, StatsHttp2ContentTypeGrpcPlusProto) {
@@ -135,7 +133,7 @@ TEST_F(GrpcStatsFilterConfigTest, StatsHttp2ContentTypeGrpcPlusProto) {
                      ->statsScope()
                      .counterFromString("grpc.lyft.users.BadCompanions.GetBadCompanions.total")
                      .value());
-  EXPECT_FALSE(stream_info_.filterState()->hasDataWithName(HttpFilterNames::get().GrpcStats));
+  EXPECT_FALSE(stream_info_.filterState()->hasDataWithName("envoy.filters.http.grpc_stats"));
 }
 
 // Test that an allowlist match results in method-named stats.
@@ -243,29 +241,25 @@ TEST_F(GrpcStatsFilterConfigTest, StatsForAllMethodsDefaultSetting) {
       deprecatedFeatureEnabled(
           "envoy.deprecated_features.grpc_stats_filter_enable_stats_for_all_methods_by_default", _))
       .WillOnce(Invoke([](absl::string_view, bool default_value) { return default_value; }));
-  EXPECT_LOG_CONTAINS("warn",
-                      "Using deprecated default value for "
-                      "'envoy.extensions.filters.http.grpc_stats.v3.FilterConfig.stats_for_all_"
-                      "methods'",
-                      initialize());
+  initialize();
 
   Http::TestRequestHeaderMapImpl request_headers{{"content-type", "application/grpc"},
                                                  {":path", "/BadCompanions/GetBadCompanions"}};
 
   doRequestResponse(request_headers);
 
-  EXPECT_EQ(1UL, decoder_callbacks_.clusterInfo()
+  EXPECT_EQ(0UL, decoder_callbacks_.clusterInfo()
                      ->statsScope()
                      .counterFromString("grpc.BadCompanions.GetBadCompanions.success")
                      .value());
-  EXPECT_EQ(1UL, decoder_callbacks_.clusterInfo()
+  EXPECT_EQ(0UL, decoder_callbacks_.clusterInfo()
                      ->statsScope()
                      .counterFromString("grpc.BadCompanions.GetBadCompanions.total")
                      .value());
   EXPECT_EQ(
-      0UL,
+      1UL,
       decoder_callbacks_.clusterInfo()->statsScope().counterFromString("grpc.success").value());
-  EXPECT_EQ(0UL,
+  EXPECT_EQ(1UL,
             decoder_callbacks_.clusterInfo()->statsScope().counterFromString("grpc.total").value());
 }
 
@@ -358,13 +352,20 @@ TEST_F(GrpcStatsFilterConfigTest, MessageCounts) {
                     .counterFromString(
                         "grpc.lyft.users.BadCompanions.GetBadCompanions.request_message_count")
                     .value());
-  EXPECT_EQ(0U, decoder_callbacks_.clusterInfo()
-                    ->statsScope()
-                    .counterFromString(
-                        "grpc.lyft.users.BadCompanions.GetBadCompanions.response_message_count")
-                    .value());
-  const auto& data = stream_info_.filterState()->getDataReadOnly<GrpcStatsObject>(
-      HttpFilterNames::get().GrpcStats);
+
+  // Check that there is response_message_count stat yet. We use
+  // stats_store_.findCounterByString rather than looking on
+  // clusterInfo()->statsScope() because findCounterByString is not an API on
+  // Stats::Store, and there is no prefix so the names will match. We verify
+  // that by double-checking we can find the request_message_count using the
+  // same API.
+  EXPECT_FALSE(stats_store_.findCounterByString(
+      "grpc.lyft.users.BadCompanions.GetBadCompanions.response_message_count"));
+  EXPECT_TRUE(stats_store_.findCounterByString(
+      "grpc.lyft.users.BadCompanions.GetBadCompanions.request_message_count"));
+
+  const auto& data =
+      stream_info_.filterState()->getDataReadOnly<GrpcStatsObject>("envoy.filters.http.grpc_stats");
   EXPECT_EQ(2U, data.request_message_count);
   EXPECT_EQ(0U, data.response_message_count);
 
@@ -408,6 +409,7 @@ TEST_F(GrpcStatsFilterConfigTest, MessageCounts) {
           data.serializeAsProto().get());
   EXPECT_EQ(2U, filter_object.request_message_count());
   EXPECT_EQ(3U, filter_object.response_message_count());
+  EXPECT_EQ("2,3", data.serializeAsString().value());
 }
 
 TEST_F(GrpcStatsFilterConfigTest, UpstreamStats) {
@@ -420,12 +422,10 @@ TEST_F(GrpcStatsFilterConfigTest, UpstreamStats) {
       {"content-type", "application/grpc+proto"},
       {":path", "/lyft.users.BadCompanions/GetBadCompanions"}};
 
-  ON_CALL(stream_info_, lastUpstreamRxByteReceived())
-      .WillByDefault(testing::Return(
-          absl::optional<std::chrono::nanoseconds>(std::chrono::nanoseconds(30000000))));
-  ON_CALL(stream_info_, lastUpstreamTxByteSent())
-      .WillByDefault(testing::Return(
-          absl::optional<std::chrono::nanoseconds>(std::chrono::nanoseconds(20000000))));
+  stream_info_.upstream_info_->upstreamTiming().last_upstream_tx_byte_sent_ =
+      MonotonicTime(std::chrono::nanoseconds(20000000));
+  stream_info_.upstream_info_->upstreamTiming().last_upstream_rx_byte_received_ =
+      MonotonicTime(std::chrono::nanoseconds(30000000));
 
   EXPECT_CALL(stats_store_,
               deliverHistogramToSinks(
@@ -442,12 +442,10 @@ TEST_F(GrpcStatsFilterConfigTest, UpstreamStatsWithTrailersOnly) {
   config_.set_enable_upstream_stats(true);
   initialize();
 
-  ON_CALL(stream_info_, lastUpstreamRxByteReceived())
-      .WillByDefault(testing::Return(
-          absl::optional<std::chrono::nanoseconds>(std::chrono::nanoseconds(30000000))));
-  ON_CALL(stream_info_, lastUpstreamTxByteSent())
-      .WillByDefault(testing::Return(
-          absl::optional<std::chrono::nanoseconds>(std::chrono::nanoseconds(20000000))));
+  stream_info_.upstream_info_->upstreamTiming().last_upstream_tx_byte_sent_ =
+      MonotonicTime(std::chrono::nanoseconds(20000000));
+  stream_info_.upstream_info_->upstreamTiming().last_upstream_rx_byte_received_ =
+      MonotonicTime(std::chrono::nanoseconds(30000000));
 
   EXPECT_CALL(stats_store_,
               deliverHistogramToSinks(

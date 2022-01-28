@@ -1,14 +1,17 @@
+#include <memory>
 #include <vector>
 
 #include "envoy/server/filter_config.h"
 
-#include "server/config_validation/server.h"
+#include "source/server/config_validation/server.h"
 
 #include "test/integration/server.h"
-#include "test/mocks/server/mocks.h"
+#include "test/mocks/server/options.h"
 #include "test/mocks/stats/mocks.h"
 #include "test/test_common/environment.h"
+#include "test/test_common/network_utility.h"
 #include "test/test_common/registry.h"
+#include "test/test_common/test_time.h"
 
 namespace Envoy {
 namespace Server {
@@ -103,7 +106,10 @@ public:
       return ProtobufTypes::MessagePtr{new ProtobufWkt::Struct()};
     }
 
-    bool isTerminalFilter() override { return true; }
+    bool isTerminalFilterByProto(const Protobuf::Message&,
+                                 Server::Configuration::FactoryContext&) override {
+      return true;
+    }
   };
 };
 
@@ -124,18 +130,24 @@ TEST_P(ValidationServerTest, NoopLifecycleNotifier) {
   server.registerCallback(ServerLifecycleNotifier::Stage::ShutdownExit, [] { FAIL(); });
   server.registerCallback(ServerLifecycleNotifier::Stage::ShutdownExit,
                           [](Event::PostCb) { FAIL(); });
+  server.setSinkPredicates(std::make_unique<testing::NiceMock<Stats::MockSinkPredicates>>());
   server.shutdown();
 }
 
 // TODO(rlazarus): We'd like use this setup to replace //test/config_test (that is, run it against
 // all the example configs) but can't until light validation is implemented, mocking out access to
 // the filesystem for TLS certs, etc. In the meantime, these are the example configs that work
-// as-is.
-INSTANTIATE_TEST_SUITE_P(ValidConfigs, ValidationServerTest,
-                         ::testing::Values("front-proxy_front-envoy.yaml",
-                                           "google_com_proxy.v2.yaml",
-                                           "grpc-bridge_server_envoy-proxy.yaml",
-                                           "front-proxy_service-envoy.yaml"));
+// as-is. (Note, /dev/stdout as an access log file is invalid on Windows, no equivalent /dev/
+// exists.)
+
+auto testing_values =
+    ::testing::Values("front-proxy_front-envoy.yaml", "envoyproxy_io_proxy.yaml",
+#if defined(WIN32) && defined(SO_ORIGINAL_DST)
+                      "configs_original-dst-cluster_proxy_config.yaml",
+#endif
+                      "grpc-bridge_server_envoy-proxy.yaml", "front-proxy_service-envoy.yaml");
+
+INSTANTIATE_TEST_SUITE_P(ValidConfigs, ValidationServerTest, testing_values);
 
 // Just make sure that all configs can be ingested without a crash. Processing of config files
 // may not be successful, but there should be no crash.
@@ -159,6 +171,20 @@ TEST_P(RuntimeFeatureValidationServerTest, ValidRuntimeLoaderSingleton) {
   // runtime loader.
   ASSERT_TRUE(validateConfig(options_, local_address, component_factory_,
                              Thread::threadFactoryForTest(), Filesystem::fileSystemForTest()));
+}
+
+// Test the admin handler stubs used in validation
+TEST(ValidationTest, Admin) {
+  auto local_address =
+      Network::Test::getCanonicalLoopbackAddress(TestEnvironment::getIpVersionsForTest()[0]);
+
+  ValidationAdmin admin(local_address);
+  std::string empty = "";
+  Server::Admin::HandlerCb cb;
+  EXPECT_TRUE(admin.addHandler(empty, empty, cb, false, false));
+  EXPECT_TRUE(admin.removeHandler(empty));
+  EXPECT_EQ(1, admin.concurrency());
+  admin.socket();
 }
 
 INSTANTIATE_TEST_SUITE_P(

@@ -8,7 +8,8 @@
 #include "envoy/http/header_map.h"
 #include "envoy/stats/scope.h"
 
-#include "common/stats/symbol_table_impl.h"
+#include "source/common/common/thread.h"
+#include "source/common/stats/symbol_table_impl.h"
 
 namespace Envoy {
 namespace Http {
@@ -44,9 +45,10 @@ public:
   explicit CodeStatsImpl(Stats::SymbolTable& symbol_table);
 
   // CodeStats
-  void chargeBasicResponseStat(Stats::Scope& scope, Stats::StatName prefix,
-                               Code response_code) const override;
-  void chargeResponseStat(const ResponseStatInfo& info) const override;
+  void chargeBasicResponseStat(Stats::Scope& scope, Stats::StatName prefix, Code response_code,
+                               bool exclude_http_code_stats) const override;
+  void chargeResponseStat(const ResponseStatInfo& info,
+                          bool exclude_http_code_stats) const override;
   void chargeResponseTiming(const ResponseTimingInfo& info) const override;
 
 private:
@@ -62,8 +64,7 @@ private:
   Stats::StatName upstreamRqGroup(Code response_code) const;
   Stats::StatName upstreamRqStatName(Code response_code) const;
 
-  mutable Stats::StatNamePool stat_name_pool_ ABSL_GUARDED_BY(mutex_);
-  mutable absl::Mutex mutex_;
+  mutable Stats::StatNamePool stat_name_pool_;
   Stats::SymbolTable& symbol_table_;
 
   const Stats::StatName canary_;
@@ -108,7 +109,9 @@ private:
 
   static constexpr uint32_t NumHttpCodes = 500;
   static constexpr uint32_t HttpCodeOffset = 100; // code 100 is at index 0.
-  mutable std::atomic<const uint8_t*> rc_stat_names_[NumHttpCodes];
+  mutable Thread::AtomicPtrArray<const uint8_t, NumHttpCodes,
+                                 Thread::AtomicPtrAllocMode::DoNotDelete>
+      rc_stat_names_;
 };
 
 /**

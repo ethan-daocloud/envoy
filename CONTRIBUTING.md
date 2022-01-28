@@ -21,6 +21,23 @@ maximize the chances of your PR being merged.
 
 * See [STYLE.md](STYLE.md)
 
+# Inclusive language policy
+
+The Envoy community has an explicit goal to be inclusive to all. As such, all PRs must adhere to the
+following guidelines for all code, APIs, and documentation:
+
+* The following words and phrases are not allowed:
+  * *Whitelist*: use allowlist instead.
+  * *Blacklist*: use denylist or blocklist instead.
+  * *Master*: use primary or main instead.
+  * *Slave*: use secondary or replica instead.
+* Documentation should be written in an inclusive style. The [Google developer
+  documentation](https://developers.google.com/style/inclusive-documentation) contains an excellent
+  reference on this topic.
+* The above policy is not considered definitive and may be amended in the future as industry best
+  practices evolve. Additional comments on this topic may be provided by maintainers during code
+  review.
+
 # Breaking change policy
 
 Both API and implementation stability are important to Envoy. Since the API is consumed by clients
@@ -30,7 +47,7 @@ versioning guidelines:
 
 * Features may be marked as deprecated in a given versioned API at any point in time, but this may
   only be done when a replacement implementation and configuration path is available in Envoy on
-  master. Deprecators must implement a conversion from the deprecated configuration to the latest
+  main. Deprecators must implement a conversion from the deprecated configuration to the latest
   `vNalpha` (with the deprecated field) that Envoy uses internally. A field may be deprecated if
   this tool would be able to perform the conversion. For example, removing a field to describe
   HTTP/2 window settings is valid if a more comprehensive HTTP/2 protocol options field is being
@@ -52,10 +69,14 @@ versioning guidelines:
   cause a configuration load failure, unless the feature in question is
   explicitly overridden in
   [runtime](https://www.envoyproxy.io/docs/envoy/latest/configuration/operations/runtime#using-runtime-overrides-for-deprecated-features)
-  config ([example](configs/using_deprecated_config.v2.yaml)). Finally, following the deprecation
-  of the API major version where the field was first
-  marked deprecated, the entire implementation code will be removed from the Envoy implementation.
-* This policy means that organizations deploying master should have some time to get ready for
+  config ([example](configs/using_deprecated_config.yaml)), or if
+  `envoy.features.enable_all_deprecated_features` is set to true. Finally, following the deprecation
+  of the API major version where the field was first marked deprecated, the entire implementation
+  code will be removed from the Envoy implementation.
+* If the runtime key `envoy.features.fail_on_any_deprecated_feature` is enabled,
+  use of deprecated fields will trigger a configuration load failure
+  rather than a logged warning.
+* This policy means that organizations deploying main should have some time to get ready for
   breaking changes at the next major API version. This is typically a window of at least 12 months
   or until the organization moves to the next major API version.
 * The breaking change policy also applies to source level extensions (e.g., filters). Code that
@@ -81,7 +102,7 @@ versioning guidelines:
 
   Please see [support/README.md](support/README.md) for more information on these hooks.
 
-* Create your PR.
+* Create your PR. If your PR adds new code, it should include tests [covering](source/docs/coverage.md) the new code. Please note that draft PRs may not be reviewed and will likely not be triaged, so do not create your PR as a draft if you want prompt reviews!
 * Tests will automatically run for you.
 * We will **not** merge any PR that is not passing tests.
 * PRs are expected to have 100% test coverage for added code. This can be verified with a coverage
@@ -89,7 +110,10 @@ versioning guidelines:
   open it.
 * Any PR that changes user-facing behavior **must** have associated documentation in [docs](docs) as
   well as [release notes](docs/root/version_history/current.rst). API changes should be documented
-  inline with protos as per the [API contribution guidelines](api/CONTRIBUTING.md).
+  inline with protos as per the [API contribution guidelines](api/CONTRIBUTING.md). If a change applies
+  to multiple sections of the release notes, it should be noted in the first (most important) section
+  that applies. For instance, a bug fix that introduces incompatible behavior should be noted in
+  `Incompatible Behavior Changes` but not in `Bug Fixes`.
 * All code comments and documentation are expected to have proper English grammar and punctuation.
   If you are not a fluent English speaker (or a bad writer ;-)) please let us know and we will try
   to find some help but there are no guarantees.
@@ -97,15 +121,30 @@ versioning guidelines:
   colon. Examples:
   * "docs: fix grammar error"
   * "http conn man: add new feature"
-* Your PR commit message will be used as the commit message when your PR is merged. You should 
+* Your PR commit message will be used as the commit message when your PR is merged. You should
   update this field if your PR diverges during review.
 * Your PR description should have details on what the PR does. If it fixes an existing issue it
   should end with "Fixes #XXX".
+* If your PR is co-authored or based on an earlier PR from another contributor,
+  please attribute them with `Co-authored-by: name <name@example.com>`. See
+  GitHub's [multiple author
+  guidance](https://help.github.com/en/github/committing-changes-to-your-project/creating-a-commit-with-multiple-authors)
+  for further details.
 * When all of the tests are passing and all other conditions described herein are satisfied, a
   maintainer will be assigned to review and merge the PR.
-* Once you submit a PR, *please do not rebase it*. It's much easier to review if subsequent commits
-  are new commits and/or merges. We squash rebase the final merged commit so the number of commits
-  you have in the PR don't matter.
+* Once your PR is under review, *please do not rebase it*. If you rebase, you will need to force push to
+  github, and github's user interface will force your reviewer to review the PR
+  from stratch rather than simply look at your latest changes.  It's much easier to review
+  new commits and/or merges. We squash rebase the final merged commit so the number of commits
+  you have in the PR don't matter. Again once your PR is assigned a reviewer, unless you need to fix DCO
+  *please do not force push*.  If you need to pull recent changes you can run
+  ```
+  branch=$(git status|head -1|cut -f3 -d\ )
+  git checkout main
+  git pull
+  git checkout "$branch"
+  git pull
+  ```
 * We expect that once a PR is opened, it will be actively worked on until it is merged or closed.
   We reserve the right to close PRs that are not making progress. This is generally defined as no
   changes for 7 days. Obviously PRs that are closed due to lack of activity can be reopened later.
@@ -118,7 +157,7 @@ versioning guidelines:
 * If your PR involves any changes to
   [envoy-filter-example](https://github.com/envoyproxy/envoy-filter-example) (for example making a new
   branch so that CI can pass) it is your responsibility to follow through with merging those
-  changes back to master once the CI dance is done.
+  changes back to main once the CI dance is done.
 * If your PR is a high risk change, the reviewer may ask that you runtime guard
   it. See the section on runtime guarding below.
 
@@ -163,18 +202,18 @@ maintainer's discretion. Generally all runtime guarded features will be set true
 release is cut. Old code paths for refactors can be cleaned up after a release and there has been
 some production run time. Old code for behavioral changes will be deprecated after six months.
 Runtime features are set true by default by inclusion in
-[source/common/runtime/runtime_features.h](https://github.com/envoyproxy/envoy/blob/master/source/common/runtime/runtime_features.h)
+[source/common/runtime/runtime_features.cc](https://github.com/envoyproxy/envoy/blob/main/source/common/runtime/runtime_features.cc)
 
 There are four suggested options for testing new runtime features:
 
-1. Create a per-test Runtime::LoaderSingleton as done in [DeprecatedFieldsTest.IndividualFieldDisallowedWithRuntimeOverride](https://github.com/envoyproxy/envoy/blob/master/test/common/protobuf/utility_test.cc)
-2. Create a [parameterized test](https://github.com/google/googletest/blob/master/googletest/docs/advanced.md#how-to-write-value-parameterized-tests)
+1. Create a per-test Runtime::LoaderSingleton as done in [DeprecatedFieldsTest.IndividualFieldDisallowedWithRuntimeOverride](https://github.com/envoyproxy/envoy/blob/main/test/common/protobuf/utility_test.cc)
+2. Create a [parameterized test](https://github.com/google/googletest/blob/master/docs/advanced.md#how-to-write-value-parameterized-tests)
    where the set up of the test sets the new runtime value explicitly to
    GetParam() as outlined in (1).
 3. Set up integration tests with custom runtime defaults as documented in the
-   [integration test README](https://github.com/envoyproxy/envoy/blob/master/test/integration/README.md)
-4. Run a given unit test with the new runtime value explicitly set true as done
-   for [runtime_flag_override_test](https://github.com/envoyproxy/envoy/blob/master/test/common/runtime/BUILD)
+   [integration test README](https://github.com/envoyproxy/envoy/blob/main/test/integration/README.md)
+4. Run a given unit test with the new runtime value explicitly set true or false as done
+   for [runtime_flag_override_test](https://github.com/envoyproxy/envoy/blob/main/test/common/runtime/BUILD)
 
 Runtime code is held to the same standard as regular Envoy code, so both the old
 path and the new should have 100% coverage both with the feature defaulting true
@@ -197,7 +236,7 @@ and false.
   organization specific shortcuts into the code.
 * If there is a question on who should review a PR please discuss in Slack.
 * Anyone is welcome to review any PR that they want, whether they are a maintainer or not.
-* Please make sure that the PR title, commit message, and description are updated if the PR changes 
+* Please make sure that the PR title, commit message, and description are updated if the PR changes
   significantly during review.
 * Please **clean up the title and body** before merging. By default, GitHub fills the squash merge
   title with the original title, and the commit body with every individual commit from the PR.
@@ -206,6 +245,38 @@ and false.
   while preserving the PR author's final DCO sign-off.
 * If a PR includes a deprecation/breaking change, notification should be sent to the
   [envoy-announce](https://groups.google.com/forum/#!forum/envoy-announce) email list.
+
+# API changes
+
+If you change anything in the [api tree](https://github.com/envoyproxy/envoy/tree/main/api),
+please read the [API Review
+Checklist](https://github.com/envoyproxy/envoy/tree/main/api/review_checklist.md)
+and make sure that your changes have addressed all of the considerations listed there.
+
+# Adding new extensions
+
+For developers adding a new extension, one can take an existing extension as the starting point.
+
+Extension configuration should be located in a directory structure like
+`api/envoy/extensions/area/plugin/`, for example `api/envoy/extensions/access_loggers/file/`
+
+The code for the extension should be located under the equivalent
+`source/extensions/area/plugin`, and include an *envoy_cc_extension* with the
+configuration and tagged with the appropriate security posture, and an
+*envoy_cc_library* with the code.
+
+More details on how to add a new extension API can be found [here](api/STYLE.md#adding-an-extension-configuration-to-the-api):
+
+# Adding contrib extensions
+
+See [EXTENSION_POLICY.md](EXTENSION_POLICY.md) for more information on contrib. Adding a contrib
+extension mostly mirrors adding a normal extension above. Some differences are noted here:
+
+* API files should be added in `api/contrib/envoy/`, but the protos' namespaces should still be as
+  in normal extensions (which will make file movement easier later if the extension gets promoted
+  to core).
+* Build config and metadata should be included in [contrib/contrib_build_config.bzl](contrib/contrib_build_config.bzl)
+  and [contrib/extensions_metadata.yaml](contrib/extensions_metadata.yaml).
 
 # DCO: Sign your work
 
@@ -299,7 +370,7 @@ should only be done to correct a DCO mistake.
 
 ## Triggering CI re-run without making changes
 
-To rerun failed tasks in CI, add a comment with the the line
+To rerun failed tasks in Azure pipelines, add a comment with the line
 
 ```
 /retest

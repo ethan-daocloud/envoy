@@ -11,10 +11,9 @@
 #include "envoy/stats/scope.h"
 #include "envoy/upstream/cluster_manager.h"
 
-#include "common/buffer/buffer_impl.h"
-
-#include "extensions/filters/network/common/redis/codec.h"
-#include "extensions/filters/network/redis_proxy/command_splitter.h"
+#include "source/common/buffer/buffer_impl.h"
+#include "source/extensions/filters/network/common/redis/codec.h"
+#include "source/extensions/filters/network/redis_proxy/command_splitter.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -57,6 +56,7 @@ public:
   const std::string stat_prefix_;
   const std::string redis_drain_close_runtime_key_{"redis.drain_close_enabled"};
   ProxyStats stats_;
+  const std::string downstream_auth_username_;
   const std::string downstream_auth_password_;
 
 private:
@@ -93,6 +93,8 @@ public:
   bool connectionAllowed() { return connection_allowed_; }
 
 private:
+  friend class RedisProxyFilterTest;
+
   struct PendingRequest : public CommandSplitter::SplitCallbacks {
     PendingRequest(ProxyFilter& parent);
     ~PendingRequest() override;
@@ -100,6 +102,9 @@ private:
     // RedisProxy::CommandSplitter::SplitCallbacks
     bool connectionAllowed() override { return parent_.connectionAllowed(); }
     void onAuth(const std::string& password) override { parent_.onAuth(*this, password); }
+    void onAuth(const std::string& username, const std::string& password) override {
+      parent_.onAuth(*this, username, password);
+    }
     void onResponse(Common::Redis::RespValuePtr&& value) override {
       parent_.onResponse(*this, std::move(value));
     }
@@ -110,6 +115,7 @@ private:
   };
 
   void onAuth(PendingRequest& request, const std::string& password);
+  void onAuth(PendingRequest& request, const std::string& username, const std::string& password);
   void onResponse(PendingRequest& request, Common::Redis::RespValuePtr&& value);
 
   Common::Redis::DecoderPtr decoder_;

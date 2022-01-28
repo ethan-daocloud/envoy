@@ -8,10 +8,10 @@
 #include "envoy/event/dispatcher.h"
 #include "envoy/event/file_event.h"
 
-#include "common/common/assert.h"
-#include "common/common/fmt.h"
-#include "common/common/utility.h"
-#include "common/filesystem/watcher_impl.h"
+#include "source/common/common/assert.h"
+#include "source/common/common/fmt.h"
+#include "source/common/common/utility.h"
+#include "source/common/filesystem/watcher_impl.h"
 
 namespace Envoy {
 namespace Filesystem {
@@ -40,7 +40,7 @@ void WatcherImpl::addWatch(absl::string_view path, uint32_t events, OnChangedCb 
   int watch_fd = inotify_add_watch(inotify_fd_, std::string(result.directory_).c_str(), watch_mask);
   if (watch_fd == -1) {
     throw EnvoyException(
-        fmt::format("unable to add filesystem watch for file {}: {}", path, strerror(errno)));
+        fmt::format("unable to add filesystem watch for file {}: {}", path, errorDetails(errno)));
   }
 
   ENVOY_LOG(debug, "added watch for directory: '{}' file: '{}' fd: {}", result.directory_,

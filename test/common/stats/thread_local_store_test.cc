@@ -1,64 +1,104 @@
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <string>
-#include <unordered_map>
 
 #include "envoy/config/metrics/v3/stats.pb.h"
 #include "envoy/stats/histogram.h"
+#include "envoy/stats/sink.h"
 
-#include "common/common/c_smart_ptr.h"
-#include "common/event/dispatcher_impl.h"
-#include "common/memory/stats.h"
-#include "common/stats/stats_matcher_impl.h"
-#include "common/stats/symbol_table_impl.h"
-#include "common/stats/tag_producer_impl.h"
-#include "common/stats/thread_local_store.h"
-#include "common/thread_local/thread_local_impl.h"
+#include "source/common/common/c_smart_ptr.h"
+#include "source/common/event/dispatcher_impl.h"
+#include "source/common/memory/stats.h"
+#include "source/common/stats/stats_matcher_impl.h"
+#include "source/common/stats/symbol_table_impl.h"
+#include "source/common/stats/tag_producer_impl.h"
+#include "source/common/stats/thread_local_store.h"
+#include "source/common/thread_local/thread_local_impl.h"
 
 #include "test/common/stats/stat_test_utility.h"
 #include "test/mocks/event/mocks.h"
-#include "test/mocks/server/mocks.h"
+#include "test/mocks/server/instance.h"
 #include "test/mocks/stats/mocks.h"
 #include "test/mocks/thread_local/mocks.h"
 #include "test/test_common/logging.h"
+#include "test/test_common/real_threads_test_helper.h"
 #include "test/test_common/utility.h"
 
 #include "absl/strings/str_split.h"
-#include "absl/synchronization/blocking_counter.h"
-#include "absl/synchronization/notification.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 
 using testing::_;
+using testing::HasSubstr;
 using testing::InSequence;
 using testing::NiceMock;
 using testing::Ref;
 using testing::Return;
+using testing::UnorderedElementsAreArray;
 
 namespace Envoy {
 namespace Stats {
 
 const uint64_t MaxStatNameLength = 127;
 
+class ThreadLocalStoreTestingPeer {
+public:
+  // Calculates the number of TLS histograms across all threads. This requires
+  // dispatching to all threads and blocking on their completion, and is exposed
+  // as a testing peer to enable tests that ensure that TLS histograms don't
+  // leak.
+  //
+  // Note that this must be called from the "main thread", which has different
+  // implications for unit tests that use real threads vs mocks. The easiest way
+  // to capture this in a general purpose helper is to use a callback to convey
+  // the resultant sum.
+  static void numTlsHistograms(ThreadLocalStoreImpl& thread_local_store_impl,
+                               const std::function<void(uint32_t)>& num_tls_hist_cb) {
+    auto num_tls_histograms = std::make_shared<std::atomic<uint32_t>>(0);
+    thread_local_store_impl.tls_cache_->runOnAllThreads(
+        [num_tls_histograms](OptRef<ThreadLocalStoreImpl::TlsCache> tls_cache) {
+          *num_tls_histograms += tls_cache->tls_histogram_cache_.size();
+        },
+        [num_tls_hist_cb, num_tls_histograms]() { num_tls_hist_cb(*num_tls_histograms); });
+  }
+};
+
 class StatsThreadLocalStoreTest : public testing::Test {
 public:
   StatsThreadLocalStoreTest()
-      : symbol_table_(SymbolTableCreator::makeSymbolTable()), alloc_(*symbol_table_),
-        store_(std::make_unique<ThreadLocalStoreImpl>(alloc_)) {
+      : alloc_(symbol_table_), store_(std::make_unique<ThreadLocalStoreImpl>(alloc_)) {
     store_->addSink(sink_);
   }
+
+  ~StatsThreadLocalStoreTest() override { tls_.shutdownGlobalThreading(); }
 
   void resetStoreWithAlloc(Allocator& alloc) {
     store_ = std::make_unique<ThreadLocalStoreImpl>(alloc);
     store_->addSink(sink_);
   }
 
-  SymbolTablePtr symbol_table_;
+  uint32_t numTlsHistograms() {
+    uint32_t num_tls_histograms;
+    absl::Mutex mutex;
+    bool done = false;
+    ThreadLocalStoreTestingPeer::numTlsHistograms(
+        *store_, [&mutex, &done, &num_tls_histograms](uint32_t num) {
+          absl::MutexLock lock(&mutex);
+          num_tls_histograms = num;
+          done = true;
+        });
+    absl::MutexLock lock(&mutex);
+    mutex.Await(absl::Condition(&done));
+    return num_tls_histograms;
+  }
+
+  SymbolTableImpl symbol_table_;
   NiceMock<Event::MockDispatcher> main_thread_dispatcher_;
   NiceMock<ThreadLocal::MockInstance> tls_;
   AllocatorImpl alloc_;
   MockSink sink_;
-  std::unique_ptr<ThreadLocalStoreImpl> store_;
+  ThreadLocalStoreImplPtr store_;
 };
 
 class HistogramWrapper {
@@ -83,7 +123,7 @@ class HistogramTest : public testing::Test {
 public:
   using NameHistogramMap = std::map<std::string, ParentHistogramSharedPtr>;
 
-  HistogramTest() : symbol_table_(SymbolTableCreator::makeSymbolTable()), alloc_(*symbol_table_) {}
+  HistogramTest() : alloc_(symbol_table_) {}
 
   void SetUp() override {
     store_ = std::make_unique<ThreadLocalStoreImpl>(alloc_);
@@ -92,6 +132,7 @@ public:
   }
 
   void TearDown() override {
+    tls_.shutdownGlobalThreading();
     store_->shutdownThreading();
     tls_.shutdownThread();
   }
@@ -171,12 +212,12 @@ public:
     }
   }
 
-  SymbolTablePtr symbol_table_;
+  SymbolTableImpl symbol_table_;
   NiceMock<Event::MockDispatcher> main_thread_dispatcher_;
   NiceMock<ThreadLocal::MockInstance> tls_;
   AllocatorImpl alloc_;
   MockSink sink_;
-  std::unique_ptr<ThreadLocalStoreImpl> store_;
+  ThreadLocalStoreImplPtr store_;
   InSequence s;
   std::vector<uint64_t> h1_cumulative_values_, h2_cumulative_values_, h1_interval_values_,
       h2_interval_values_;
@@ -187,7 +228,7 @@ TEST_F(StatsThreadLocalStoreTest, NoTls) {
 
   Counter& c1 = store_->counterFromString("c1");
   EXPECT_EQ(&c1, &store_->counterFromString("c1"));
-  StatNameManagedStorage c1_name("c1", *symbol_table_);
+  StatNameManagedStorage c1_name("c1", symbol_table_);
   c1.add(100);
   auto found_counter = store_->findCounter(c1_name.statName());
   ASSERT_TRUE(found_counter.has_value());
@@ -198,7 +239,7 @@ TEST_F(StatsThreadLocalStoreTest, NoTls) {
 
   Gauge& g1 = store_->gaugeFromString("g1", Gauge::ImportMode::Accumulate);
   EXPECT_EQ(&g1, &store_->gaugeFromString("g1", Gauge::ImportMode::Accumulate));
-  StatNameManagedStorage g1_name("g1", *symbol_table_);
+  StatNameManagedStorage g1_name("g1", symbol_table_);
   g1.set(100);
   auto found_gauge = store_->findGauge(g1_name.statName());
   ASSERT_TRUE(found_gauge.has_value());
@@ -209,7 +250,7 @@ TEST_F(StatsThreadLocalStoreTest, NoTls) {
 
   Histogram& h1 = store_->histogramFromString("h1", Stats::Histogram::Unit::Unspecified);
   EXPECT_EQ(&h1, &store_->histogramFromString("h1", Stats::Histogram::Unit::Unspecified));
-  StatNameManagedStorage h1_name("h1", *symbol_table_);
+  StatNameManagedStorage h1_name("h1", symbol_table_);
   auto found_histogram = store_->findHistogram(h1_name.statName());
   ASSERT_TRUE(found_histogram.has_value());
   EXPECT_EQ(&h1, &found_histogram->get());
@@ -241,7 +282,7 @@ TEST_F(StatsThreadLocalStoreTest, Tls) {
 
   Counter& c1 = store_->counterFromString("c1");
   EXPECT_EQ(&c1, &store_->counterFromString("c1"));
-  StatNameManagedStorage c1_name("c1", *symbol_table_);
+  StatNameManagedStorage c1_name("c1", symbol_table_);
   c1.add(100);
   auto found_counter = store_->findCounter(c1_name.statName());
   ASSERT_TRUE(found_counter.has_value());
@@ -252,7 +293,7 @@ TEST_F(StatsThreadLocalStoreTest, Tls) {
 
   Gauge& g1 = store_->gaugeFromString("g1", Gauge::ImportMode::Accumulate);
   EXPECT_EQ(&g1, &store_->gaugeFromString("g1", Gauge::ImportMode::Accumulate));
-  StatNameManagedStorage g1_name("g1", *symbol_table_);
+  StatNameManagedStorage g1_name("g1", symbol_table_);
   g1.set(100);
   auto found_gauge = store_->findGauge(g1_name.statName());
   ASSERT_TRUE(found_gauge.has_value());
@@ -263,7 +304,7 @@ TEST_F(StatsThreadLocalStoreTest, Tls) {
 
   Histogram& h1 = store_->histogramFromString("h1", Stats::Histogram::Unit::Unspecified);
   EXPECT_EQ(&h1, &store_->histogramFromString("h1", Stats::Histogram::Unit::Unspecified));
-  StatNameManagedStorage h1_name("h1", *symbol_table_);
+  StatNameManagedStorage h1_name("h1", symbol_table_);
   auto found_histogram = store_->findHistogram(h1_name.statName());
   ASSERT_TRUE(found_histogram.has_value());
   EXPECT_EQ(&h1, &found_histogram->get());
@@ -282,6 +323,7 @@ TEST_F(StatsThreadLocalStoreTest, Tls) {
   EXPECT_EQ(&t1, store_->textReadouts().front().get()); // front() ok when size()==1
   EXPECT_EQ(2UL, store_->textReadouts().front().use_count());
 
+  tls_.shutdownGlobalThreading();
   store_->shutdownThreading();
   tls_.shutdownThread();
 
@@ -305,11 +347,11 @@ TEST_F(StatsThreadLocalStoreTest, BasicScope) {
   Counter& c2 = scope1->counterFromString("c2");
   EXPECT_EQ("c1", c1.name());
   EXPECT_EQ("scope1.c2", c2.name());
-  StatNameManagedStorage c1_name("c1", *symbol_table_);
+  StatNameManagedStorage c1_name("c1", symbol_table_);
   auto found_counter = store_->findCounter(c1_name.statName());
   ASSERT_TRUE(found_counter.has_value());
   EXPECT_EQ(&c1, &found_counter->get());
-  StatNameManagedStorage c2_name("scope1.c2", *symbol_table_);
+  StatNameManagedStorage c2_name("scope1.c2", symbol_table_);
   auto found_counter2 = store_->findCounter(c2_name.statName());
   ASSERT_TRUE(found_counter2.has_value());
   EXPECT_EQ(&c2, &found_counter2->get());
@@ -318,11 +360,11 @@ TEST_F(StatsThreadLocalStoreTest, BasicScope) {
   Gauge& g2 = scope1->gaugeFromString("g2", Gauge::ImportMode::Accumulate);
   EXPECT_EQ("g1", g1.name());
   EXPECT_EQ("scope1.g2", g2.name());
-  StatNameManagedStorage g1_name("g1", *symbol_table_);
+  StatNameManagedStorage g1_name("g1", symbol_table_);
   auto found_gauge = store_->findGauge(g1_name.statName());
   ASSERT_TRUE(found_gauge.has_value());
   EXPECT_EQ(&g1, &found_gauge->get());
-  StatNameManagedStorage g2_name("scope1.g2", *symbol_table_);
+  StatNameManagedStorage g2_name("scope1.g2", symbol_table_);
   auto found_gauge2 = store_->findGauge(g2_name.statName());
   ASSERT_TRUE(found_gauge2.has_value());
   EXPECT_EQ(&g2, &found_gauge2->get());
@@ -335,11 +377,11 @@ TEST_F(StatsThreadLocalStoreTest, BasicScope) {
   h1.recordValue(100);
   EXPECT_CALL(sink_, onHistogramComplete(Ref(h2), 200));
   h2.recordValue(200);
-  StatNameManagedStorage h1_name("h1", *symbol_table_);
+  StatNameManagedStorage h1_name("h1", symbol_table_);
   auto found_histogram = store_->findHistogram(h1_name.statName());
   ASSERT_TRUE(found_histogram.has_value());
   EXPECT_EQ(&h1, &found_histogram->get());
-  StatNameManagedStorage h2_name("scope1.h2", *symbol_table_);
+  StatNameManagedStorage h2_name("scope1.h2", symbol_table_);
   auto found_histogram2 = store_->findHistogram(h2_name.statName());
   ASSERT_TRUE(found_histogram2.has_value());
   EXPECT_EQ(&h2, &found_histogram2->get());
@@ -349,20 +391,20 @@ TEST_F(StatsThreadLocalStoreTest, BasicScope) {
   EXPECT_EQ("t1", t1.name());
   EXPECT_EQ("scope1.t2", t2.name());
 
-  StatNameManagedStorage tag_key("a", *symbol_table_);
-  StatNameManagedStorage tag_value("b", *symbol_table_);
+  StatNameManagedStorage tag_key("a", symbol_table_);
+  StatNameManagedStorage tag_value("b", symbol_table_);
   StatNameTagVector tags{{StatName(tag_key.statName()), StatName(tag_value.statName())}};
 
   const TagVector expectedTags = {Tag{"a", "b"}};
 
   {
-    StatNameManagedStorage storage("c3", *symbol_table_);
+    StatNameManagedStorage storage("c3", symbol_table_);
     Counter& counter = scope1->counterFromStatNameWithTags(StatName(storage.statName()), tags);
     EXPECT_EQ(expectedTags, counter.tags());
     EXPECT_EQ(&counter, &scope1->counterFromStatNameWithTags(StatName(storage.statName()), tags));
   }
   {
-    StatNameManagedStorage storage("g3", *symbol_table_);
+    StatNameManagedStorage storage("g3", symbol_table_);
     Gauge& gauge = scope1->gaugeFromStatNameWithTags(StatName(storage.statName()), tags,
                                                      Gauge::ImportMode::Accumulate);
     EXPECT_EQ(expectedTags, gauge.tags());
@@ -370,7 +412,7 @@ TEST_F(StatsThreadLocalStoreTest, BasicScope) {
                                                          Gauge::ImportMode::Accumulate));
   }
   {
-    StatNameManagedStorage storage("h3", *symbol_table_);
+    StatNameManagedStorage storage("h3", symbol_table_);
     Histogram& histogram = scope1->histogramFromStatNameWithTags(
         StatName(storage.statName()), tags, Stats::Histogram::Unit::Unspecified);
     EXPECT_EQ(expectedTags, histogram.tags());
@@ -379,10 +421,114 @@ TEST_F(StatsThreadLocalStoreTest, BasicScope) {
                                                      Stats::Histogram::Unit::Unspecified));
   }
 
+  tls_.shutdownGlobalThreading();
   store_->shutdownThreading();
   scope1->deliverHistogramToSinks(h1, 100);
   scope1->deliverHistogramToSinks(h2, 200);
+  scope1.reset();
   tls_.shutdownThread();
+}
+
+TEST_F(StatsThreadLocalStoreTest, HistogramScopeOverlap) {
+  InSequence s;
+  store_->initializeThreading(main_thread_dispatcher_, tls_);
+
+  // Creating two scopes with the same name gets you two distinct scope objects.
+  ScopePtr scope1 = store_->createScope("scope.");
+  ScopePtr scope2 = store_->createScope("scope.");
+  EXPECT_NE(scope1, scope2);
+
+  EXPECT_EQ(0, store_->histograms().size());
+  EXPECT_EQ(0, numTlsHistograms());
+
+  // However, stats created in the two same-named scopes will be the same objects.
+  Counter& counter = scope1->counterFromString("counter");
+  EXPECT_EQ(&counter, &scope2->counterFromString("counter"));
+  Gauge& gauge = scope1->gaugeFromString("gauge", Gauge::ImportMode::Accumulate);
+  EXPECT_EQ(&gauge, &scope2->gaugeFromString("gauge", Gauge::ImportMode::Accumulate));
+  TextReadout& text_readout = scope1->textReadoutFromString("tr");
+  EXPECT_EQ(&text_readout, &scope2->textReadoutFromString("tr"));
+  Histogram& histogram = scope1->histogramFromString("histogram", Histogram::Unit::Unspecified);
+  EXPECT_EQ(&histogram, &scope2->histogramFromString("histogram", Histogram::Unit::Unspecified));
+
+  // The histogram was created in scope1, which can now be destroyed. But the
+  // histogram is kept alive by scope2.
+  EXPECT_CALL(sink_, onHistogramComplete(Ref(histogram), 100));
+  histogram.recordValue(100);
+  EXPECT_EQ(1, store_->histograms().size());
+  EXPECT_EQ(1, numTlsHistograms());
+  scope1.reset();
+  EXPECT_EQ(1, store_->histograms().size());
+  EXPECT_EQ(1, numTlsHistograms());
+  EXPECT_CALL(sink_, onHistogramComplete(Ref(histogram), 200));
+  histogram.recordValue(200);
+  EXPECT_EQ(&histogram, &scope2->histogramFromString("histogram", Histogram::Unit::Unspecified));
+  scope2.reset();
+  EXPECT_EQ(0, store_->histograms().size());
+  EXPECT_EQ(0, numTlsHistograms());
+
+  tls_.shutdownGlobalThreading();
+  store_->shutdownThreading();
+
+  store_->histogramFromString("histogram_after_shutdown", Histogram::Unit::Unspecified);
+
+  tls_.shutdownThread();
+}
+
+TEST_F(StatsThreadLocalStoreTest, ForEach) {
+  auto collect_scopes = [this]() -> std::vector<std::string> {
+    std::vector<std::string> names;
+    store_->forEachScope([](size_t) {},
+                         [&names](const Scope& scope) {
+                           names.push_back(scope.constSymbolTable().toString(scope.prefix()));
+                         });
+    return names;
+  };
+  auto collect_counters = [this]() -> std::vector<std::string> {
+    std::vector<std::string> names;
+    store_->forEachCounter([](size_t) {},
+                           [&names](Counter& counter) { names.push_back(counter.name()); });
+    return names;
+  };
+  auto collect_gauges = [this]() -> std::vector<std::string> {
+    std::vector<std::string> names;
+    store_->forEachGauge([](size_t) {}, [&names](Gauge& gauge) { names.push_back(gauge.name()); });
+    return names;
+  };
+  auto collect_text_readouts = [this]() -> std::vector<std::string> {
+    std::vector<std::string> names;
+    store_->forEachTextReadout(
+        [](size_t) {},
+        [&names](TextReadout& text_readout) { names.push_back(text_readout.name()); });
+    return names;
+  };
+
+  // TODO(pradeepcrao): add tests for histograms when forEachHistogram is added
+
+  const std::vector<std::string> empty;
+
+  EXPECT_THAT(collect_scopes(), UnorderedElementsAreArray({"", ""}));
+  EXPECT_THAT(collect_counters(), UnorderedElementsAreArray(empty));
+  EXPECT_THAT(collect_gauges(), UnorderedElementsAreArray(empty));
+  EXPECT_THAT(collect_text_readouts(), UnorderedElementsAreArray(empty));
+
+  ScopePtr scope1 = store_->createScope("scope1");
+  scope1->counterFromString("counter1");
+  scope1->gaugeFromString("gauge1", Gauge::ImportMode::Accumulate);
+  scope1->textReadoutFromString("tr1");
+  ScopePtr scope2 = scope1->createScope("scope2");
+  scope2->counterFromString("counter2");
+  scope2->gaugeFromString("gauge2", Gauge::ImportMode::Accumulate);
+  scope2->textReadoutFromString("tr2");
+  ScopePtr scope3 = store_->createScope("scope3");
+  EXPECT_THAT(collect_scopes(),
+              UnorderedElementsAreArray({"", "", "scope1", "scope1.scope2", "scope3"}));
+  EXPECT_THAT(collect_counters(),
+              UnorderedElementsAreArray({"scope1.counter1", "scope1.scope2.counter2"}));
+  EXPECT_THAT(collect_gauges(),
+              UnorderedElementsAreArray({"scope1.gauge1", "scope1.scope2.gauge2"}));
+  EXPECT_THAT(collect_text_readouts(),
+              UnorderedElementsAreArray({"scope1.tr1", "scope1.scope2.tr2"}));
 }
 
 // Validate that we sanitize away bad characters in the stats prefix.
@@ -394,6 +540,7 @@ TEST_F(StatsThreadLocalStoreTest, SanitizePrefix) {
   Counter& c1 = scope1->counterFromString("c1");
   EXPECT_EQ("scope1___foo.c1", c1.name());
 
+  tls_.shutdownGlobalThreading();
   store_->shutdownThreading();
   tls_.shutdownThread();
 }
@@ -417,13 +564,19 @@ TEST_F(StatsThreadLocalStoreTest, ScopeDelete) {
   EXPECT_EQ("scope1.c1", c1->name());
 
   EXPECT_CALL(main_thread_dispatcher_, post(_));
-  EXPECT_CALL(tls_, runOnAllThreads(_, _));
+  EXPECT_CALL(tls_, runOnAllThreads(_, _)).Times(testing::AtLeast(1));
   scope1.reset();
-  EXPECT_EQ(0UL, store_->counters().size());
+  // The counter is gone from all scopes, but is still held in the local
+  // variable c1. Hence, it will not be removed from the allocator or store.
+  EXPECT_EQ(1UL, store_->counters().size());
 
   EXPECT_EQ(1L, c1.use_count());
   c1.reset();
+  // Removing the counter from the local variable, should now remove it from the
+  // allocator.
+  EXPECT_EQ(0UL, store_->counters().size());
 
+  tls_.shutdownGlobalThreading();
   store_->shutdownThreading();
   tls_.shutdownThread();
 }
@@ -435,7 +588,7 @@ TEST_F(StatsThreadLocalStoreTest, NestedScopes) {
   ScopePtr scope1 = store_->createScope("scope1.");
   Counter& c1 = scope1->counterFromString("foo.bar");
   EXPECT_EQ("scope1.foo.bar", c1.name());
-  StatNameManagedStorage c1_name("scope1.foo.bar", *symbol_table_);
+  StatNameManagedStorage c1_name("scope1.foo.bar", symbol_table_);
   auto found_counter = store_->findCounter(c1_name.statName());
   ASSERT_TRUE(found_counter.has_value());
   EXPECT_EQ(&c1, &found_counter->get());
@@ -444,7 +597,7 @@ TEST_F(StatsThreadLocalStoreTest, NestedScopes) {
   Counter& c2 = scope2->counterFromString("bar");
   EXPECT_EQ(&c1, &c2);
   EXPECT_EQ("scope1.foo.bar", c2.name());
-  StatNameManagedStorage c2_name("scope1.foo.bar", *symbol_table_);
+  StatNameManagedStorage c2_name("scope1.foo.bar", symbol_table_);
   auto found_counter2 = store_->findCounter(c2_name.statName());
   ASSERT_TRUE(found_counter2.has_value());
 
@@ -459,6 +612,7 @@ TEST_F(StatsThreadLocalStoreTest, NestedScopes) {
   TextReadout& t1 = scope2->textReadoutFromString("some_string");
   EXPECT_EQ("scope1.foo.some_string", t1.name());
 
+  tls_.shutdownGlobalThreading();
   store_->shutdownThreading();
   tls_.shutdownThread();
 }
@@ -523,6 +677,7 @@ TEST_F(StatsThreadLocalStoreTest, OverlappingScopes) {
   EXPECT_EQ("abc", t2.value());
   EXPECT_EQ(1UL, store_->textReadouts().size());
 
+  tls_.shutdownGlobalThreading();
   store_->shutdownThreading();
   tls_.shutdownThread();
 }
@@ -568,6 +723,7 @@ TEST_F(StatsThreadLocalStoreTest, TextReadoutAllLengths) {
   t.set("");
   EXPECT_EQ("", t.value());
 
+  tls_.shutdownGlobalThreading();
   store_->shutdownThreading();
   tls_.shutdownThread();
 }
@@ -575,8 +731,8 @@ TEST_F(StatsThreadLocalStoreTest, TextReadoutAllLengths) {
 class ThreadLocalStoreNoMocksTestBase : public testing::Test {
 public:
   ThreadLocalStoreNoMocksTestBase()
-      : symbol_table_(SymbolTableCreator::makeSymbolTable()), alloc_(*symbol_table_),
-        store_(std::make_unique<ThreadLocalStoreImpl>(alloc_)), pool_(*symbol_table_) {}
+      : alloc_(symbol_table_), store_(std::make_unique<ThreadLocalStoreImpl>(alloc_)),
+        pool_(symbol_table_) {}
   ~ThreadLocalStoreNoMocksTestBase() override {
     if (store_ != nullptr) {
       store_->shutdownThreading();
@@ -585,16 +741,16 @@ public:
 
   StatName makeStatName(absl::string_view name) { return pool_.add(name); }
 
-  SymbolTablePtr symbol_table_;
+  SymbolTableImpl symbol_table_;
   AllocatorImpl alloc_;
-  std::unique_ptr<ThreadLocalStoreImpl> store_;
+  ThreadLocalStoreImplPtr store_;
   StatNamePool pool_;
 };
 
 class LookupWithStatNameTest : public ThreadLocalStoreNoMocksTestBase {};
 
 TEST_F(LookupWithStatNameTest, All) {
-  ScopePtr scope1 = store_->createScope("scope1.");
+  ScopePtr scope1 = store_->scopeFromStatName(makeStatName("scope1"));
   Counter& c1 = store_->Store::counterFromStatName(makeStatName("c1"));
   Counter& c2 = scope1->counterFromStatName(makeStatName("c2"));
   EXPECT_EQ("c1", c1.name());
@@ -627,10 +783,11 @@ TEST_F(LookupWithStatNameTest, All) {
   h1.recordValue(200);
   h2.recordValue(200);
 
-  ScopePtr scope2 = scope1->createScope("foo.");
+  ScopePtr scope2 = scope1->scopeFromStatName(makeStatName("foo"));
   EXPECT_EQ("scope1.foo.bar", scope2->counterFromStatName(makeStatName("bar")).name());
 
-  // Validate that we sanitize away bad characters in the stats prefix.
+  // Validate that we sanitize away bad characters in the stats prefix. This happens only
+  // when constructing a stat from a string, not from a stat name.
   ScopePtr scope3 = scope1->createScope(std::string("foo:\0:.", 7));
   EXPECT_EQ("scope1.foo___.bar", scope3->counterFromString("bar").name());
 
@@ -643,11 +800,34 @@ TEST_F(LookupWithStatNameTest, NotFound) {
   EXPECT_FALSE(store_->findCounter(not_found));
   EXPECT_FALSE(store_->findGauge(not_found));
   EXPECT_FALSE(store_->findHistogram(not_found));
+  EXPECT_FALSE(store_->findTextReadout(not_found));
 }
 
 class StatsMatcherTLSTest : public StatsThreadLocalStoreTest {
 public:
   envoy::config::metrics::v3::StatsConfig stats_config_;
+
+  ~StatsMatcherTLSTest() override {
+    tls_.shutdownGlobalThreading();
+    store_->shutdownThreading();
+  }
+
+  // Adds counters for 1000 clusters and returns the amount of memory consumed.
+  uint64_t memoryConsumedAddingClusterStats() {
+    StatNamePool pool(symbol_table_);
+    std::vector<StatName> stat_names;
+    Stats::TestUtil::forEachSampleStat(1000, false, [&pool, &stat_names](absl::string_view name) {
+      stat_names.push_back(pool.add(name));
+    });
+
+    {
+      TestUtil::MemoryTest memory_test;
+      for (StatName stat_name : stat_names) {
+        store_->counterFromStatName(stat_name);
+      }
+      return memory_test.consumedBytes();
+    }
+  }
 };
 
 TEST_F(StatsMatcherTLSTest, TestNoOpStatImpls) {
@@ -655,7 +835,7 @@ TEST_F(StatsMatcherTLSTest, TestNoOpStatImpls) {
 
   stats_config_.mutable_stats_matcher()->mutable_exclusion_list()->add_patterns()->set_prefix(
       "noop");
-  store_->setStatsMatcher(std::make_unique<StatsMatcherImpl>(stats_config_));
+  store_->setStatsMatcher(std::make_unique<StatsMatcherImpl>(stats_config_, symbol_table_));
 
   // Testing No-op counters, gauges, histograms which match the prefix "noop".
 
@@ -716,11 +896,10 @@ TEST_F(StatsMatcherTLSTest, TestNoOpStatImpls) {
       store_->histogramFromString("noop_histogram", Stats::Histogram::Unit::Unspecified);
   EXPECT_EQ(noop_histogram.name(), "");
   EXPECT_FALSE(noop_histogram.used());
+  EXPECT_EQ(Stats::Histogram::Unit::Null, noop_histogram.unit());
   Histogram& noop_histogram_2 =
       store_->histogramFromString("noop_histogram_2", Stats::Histogram::Unit::Unspecified);
   EXPECT_EQ(&noop_histogram, &noop_histogram_2);
-
-  store_->shutdownThreading();
 }
 
 // We only test the exclusion list -- the inclusion list is the inverse, and both are tested in
@@ -731,11 +910,9 @@ TEST_F(StatsMatcherTLSTest, TestExclusionRegex) {
   // Expected to alloc lowercase_counter, lowercase_gauge, valid_counter, valid_gauge
 
   // Will block all stats containing any capital alphanumeric letter.
-  stats_config_.mutable_stats_matcher()
-      ->mutable_exclusion_list()
-      ->add_patterns()
-      ->set_hidden_envoy_deprecated_regex(".*[A-Z].*");
-  store_->setStatsMatcher(std::make_unique<StatsMatcherImpl>(stats_config_));
+  stats_config_.mutable_stats_matcher()->mutable_exclusion_list()->add_patterns()->MergeFrom(
+      TestUtility::createRegexMatcher(".*[A-Z].*"));
+  store_->setStatsMatcher(std::make_unique<StatsMatcherImpl>(stats_config_, symbol_table_));
 
   // The creation of counters/gauges/histograms which have no uppercase letters should succeed.
   Counter& lowercase_counter = store_->counterFromString("lowercase_counter");
@@ -780,7 +957,7 @@ TEST_F(StatsMatcherTLSTest, TestExclusionRegex) {
   // the string "invalid".
   stats_config_.mutable_stats_matcher()->mutable_exclusion_list()->add_patterns()->set_prefix(
       "invalid");
-  store_->setStatsMatcher(std::make_unique<StatsMatcherImpl>(stats_config_));
+  store_->setStatsMatcher(std::make_unique<StatsMatcherImpl>(stats_config_, symbol_table_));
 
   Counter& valid_counter = store_->counterFromString("valid_counter");
   valid_counter.inc();
@@ -832,9 +1009,40 @@ TEST_F(StatsMatcherTLSTest, TestExclusionRegex) {
   TextReadout& invalid_string_2 = store_->textReadoutFromString("also_INVLD_string");
   invalid_string_2.set("still no");
   EXPECT_EQ("", invalid_string_2.value());
+}
 
-  // Expected to free lowercase_counter, lowercase_gauge, valid_counter, valid_gauge
-  store_->shutdownThreading();
+// Rejecting stats of the form "cluster." enables an optimization in the matcher
+// infrastructure that performs the rejection without converting from StatName
+// to string, obviating the need to memoize the rejection in a set. This saves
+// a ton of memory, allowing us to reject thousands of stats without consuming
+// memory. Note that the trailing "." is critical so we can compare symbolically.
+TEST_F(StatsMatcherTLSTest, RejectPrefixDot) {
+  store_->initializeThreading(main_thread_dispatcher_, tls_);
+  stats_config_.mutable_stats_matcher()->mutable_exclusion_list()->add_patterns()->set_prefix(
+      "cluster."); // Prefix match can be executed symbolically.
+  store_->setStatsMatcher(std::make_unique<Stats::StatsMatcherImpl>(stats_config_, symbol_table_));
+  uint64_t mem_consumed = memoryConsumedAddingClusterStats();
+
+  // No memory is consumed at all while rejecting stats from "prefix."
+  EXPECT_MEMORY_EQ(mem_consumed, 0);
+  EXPECT_MEMORY_LE(mem_consumed, 0);
+}
+
+// Repeating the same test but retaining the dot means that the StatsMatcher
+// infrastructure requires us remember the rejected StatNames in an ever-growing
+// map. That map is needed to avoid taking locks while re-rejecting stats we've
+// rejected in the past.
+TEST_F(StatsMatcherTLSTest, RejectPrefixNoDot) {
+  store_->initializeThreading(main_thread_dispatcher_, tls_);
+  stats_config_.mutable_stats_matcher()->mutable_exclusion_list()->add_patterns()->set_prefix(
+      "cluster"); // No dot at the end means we have to compare as strings.
+  store_->setStatsMatcher(std::make_unique<Stats::StatsMatcherImpl>(stats_config_, symbol_table_));
+  uint64_t mem_consumed = memoryConsumedAddingClusterStats();
+
+  // Memory is consumed at all while rejecting stats from "prefix" in proportion
+  // to the number of stat instantiations attempted.
+  EXPECT_MEMORY_EQ(mem_consumed, 2936480);
+  EXPECT_MEMORY_LE(mem_consumed, 3500000);
 }
 
 // Tests the logic for caching the stats-matcher results, and in particular the
@@ -846,14 +1054,14 @@ TEST_F(StatsMatcherTLSTest, TestExclusionRegex) {
 class RememberStatsMatcherTest : public testing::TestWithParam<bool> {
 public:
   RememberStatsMatcherTest()
-      : symbol_table_(SymbolTableCreator::makeSymbolTable()), heap_alloc_(*symbol_table_),
-        store_(heap_alloc_), scope_(store_.createScope("scope.")) {
+      : heap_alloc_(symbol_table_), store_(heap_alloc_), scope_(store_.createScope("scope.")) {
     if (GetParam()) {
       store_.initializeThreading(main_thread_dispatcher_, tls_);
     }
   }
 
   ~RememberStatsMatcherTest() override {
+    tls_.shutdownGlobalThreading();
     store_.shutdownThreading();
     tls_.shutdownThread();
   }
@@ -870,11 +1078,21 @@ public:
     StatsMatcherPtr matcher_ptr(matcher);
     store_.setStatsMatcher(std::move(matcher_ptr));
 
-    EXPECT_CALL(*matcher, rejects("scope.reject")).WillOnce(Return(true));
-    EXPECT_CALL(*matcher, rejects("scope.ok")).WillOnce(Return(false));
-
+    StatNamePool pool(symbol_table_);
+    StatsMatcher::FastResult no_fast_rejection = StatsMatcher::FastResult::NoMatch;
     for (int j = 0; j < 5; ++j) {
+      EXPECT_CALL(*matcher, fastRejects(pool.add("scope.reject")))
+          .WillOnce(Return(no_fast_rejection));
+      if (j == 0) {
+        EXPECT_CALL(*matcher, slowRejects(no_fast_rejection, pool.add("scope.reject")))
+            .WillOnce(Return(true));
+      }
       EXPECT_EQ("", lookup_stat("reject"));
+      EXPECT_CALL(*matcher, fastRejects(pool.add("scope.ok"))).WillOnce(Return(no_fast_rejection));
+      if (j == 0) {
+        EXPECT_CALL(*matcher, slowRejects(no_fast_rejection, pool.add("scope.ok")))
+            .WillOnce(Return(false));
+      }
       EXPECT_EQ("scope.ok", lookup_stat("ok"));
     }
   }
@@ -889,8 +1107,10 @@ public:
 
     ScopePtr scope = store_.createScope("scope.");
 
+    StatNamePool pool(symbol_table_);
     for (int j = 0; j < 5; ++j) {
-      // Note: zero calls to reject() are made, as reject-all should short-circuit.
+      // Note: zero calls to fastReject() or slowReject() are made, as
+      // reject-all should short-circuit.
       EXPECT_EQ("", lookup_stat("reject"));
     }
   }
@@ -902,9 +1122,12 @@ public:
     matcher->accepts_all_ = true;
     StatsMatcherPtr matcher_ptr(matcher);
     store_.setStatsMatcher(std::move(matcher_ptr));
+    StatNamePool pool(symbol_table_);
 
+    StatsMatcher::FastResult no_fast_rejection = StatsMatcher::FastResult::NoMatch;
     for (int j = 0; j < 5; ++j) {
-      // Note: zero calls to reject() are made, as accept-all should short-circuit.
+      EXPECT_CALL(*matcher, fastRejects(pool.add("scope.ok"))).WillOnce(Return(no_fast_rejection));
+      // Note: zero calls to slowReject() are made, as accept-all should short-circuit.
       EXPECT_EQ("scope.ok", lookup_stat("ok"));
     }
   }
@@ -938,7 +1161,13 @@ public:
     };
   }
 
-  Stats::SymbolTablePtr symbol_table_;
+  LookupStatFn lookupTextReadoutFn() {
+    return [this](const std::string& stat_name) -> std::string {
+      return scope_->textReadoutFromString(stat_name).name();
+    };
+  }
+
+  SymbolTableImpl symbol_table_;
   NiceMock<Event::MockDispatcher> main_thread_dispatcher_;
   NiceMock<ThreadLocal::MockInstance> tls_;
   AllocatorImpl heap_alloc_;
@@ -979,6 +1208,14 @@ TEST_P(RememberStatsMatcherTest, HistogramRejectsAll) { testRejectsAll(lookupHis
 
 TEST_P(RememberStatsMatcherTest, HistogramAcceptsAll) { testAcceptsAll(lookupHistogramFn()); }
 
+TEST_P(RememberStatsMatcherTest, TextReadoutRejectOne) {
+  testRememberMatcher(lookupTextReadoutFn());
+}
+
+TEST_P(RememberStatsMatcherTest, TextReadoutRejectsAll) { testRejectsAll(lookupTextReadoutFn()); }
+
+TEST_P(RememberStatsMatcherTest, TextReadoutAcceptsAll) { testAcceptsAll(lookupTextReadoutFn()); }
+
 TEST_F(StatsThreadLocalStoreTest, RemoveRejectedStats) {
   store_->initializeThreading(main_thread_dispatcher_, tls_);
   Counter& counter = store_->counterFromString("c1");
@@ -999,7 +1236,7 @@ TEST_F(StatsThreadLocalStoreTest, RemoveRejectedStats) {
   envoy::config::metrics::v3::StatsConfig stats_config;
   stats_config.mutable_stats_matcher()->mutable_inclusion_list()->add_patterns()->set_exact(
       "no-such-stat");
-  store_->setStatsMatcher(std::make_unique<StatsMatcherImpl>(stats_config));
+  store_->setStatsMatcher(std::make_unique<StatsMatcherImpl>(stats_config, symbol_table_));
 
   // They can no longer be found.
   EXPECT_EQ(0, store_->counters().size());
@@ -1013,6 +1250,49 @@ TEST_F(StatsThreadLocalStoreTest, RemoveRejectedStats) {
   EXPECT_CALL(sink_, onHistogramComplete(Ref(histogram), 42));
   histogram.recordValue(42);
   textReadout.set("fortytwo");
+  tls_.shutdownGlobalThreading();
+  store_->shutdownThreading();
+  tls_.shutdownThread();
+}
+
+// Verify that asking for deleted stats by name does not create new copies on
+// the allocator.
+TEST_F(StatsThreadLocalStoreTest, AskForRejectedStat) {
+  store_->initializeThreading(main_thread_dispatcher_, tls_);
+  Counter& counter = store_->counterFromString("c1");
+  Gauge& gauge = store_->gaugeFromString("g1", Gauge::ImportMode::Accumulate);
+  TextReadout& text_readout = store_->textReadoutFromString("t1");
+  ASSERT_EQ(1, store_->counters().size()); // "c1".
+  ASSERT_EQ(1, store_->gauges().size());
+  ASSERT_EQ(1, store_->textReadouts().size());
+
+  // Will effectively block all stats, and remove all the non-matching stats.
+  envoy::config::metrics::v3::StatsConfig stats_config;
+  stats_config.mutable_stats_matcher()->mutable_inclusion_list()->add_patterns()->set_exact(
+      "no-such-stat");
+  store_->setStatsMatcher(std::make_unique<StatsMatcherImpl>(stats_config, symbol_table_));
+
+  // They can no longer be found.
+  EXPECT_EQ(0, store_->counters().size());
+  EXPECT_EQ(0, store_->gauges().size());
+  EXPECT_EQ(0, store_->textReadouts().size());
+
+  // Ask for the rejected stats again by name.
+  Counter& counter2 = store_->counterFromString("c1");
+  Gauge& gauge2 = store_->gaugeFromString("g1", Gauge::ImportMode::Accumulate);
+  TextReadout& text_readout2 = store_->textReadoutFromString("t1");
+
+  // Verify we got the same stats.
+  EXPECT_EQ(&counter, &counter2);
+  EXPECT_EQ(&gauge, &gauge2);
+  EXPECT_EQ(&text_readout, &text_readout2);
+
+  // Verify that new stats were not created.
+  EXPECT_EQ(0, store_->counters().size());
+  EXPECT_EQ(0, store_->gauges().size());
+  EXPECT_EQ(0, store_->textReadouts().size());
+
+  tls_.shutdownGlobalThreading();
   store_->shutdownThreading();
   tls_.shutdownThread();
 }
@@ -1029,85 +1309,60 @@ TEST_F(StatsThreadLocalStoreTest, NonHotRestartNoTruncation) {
   // This works fine, and we can find it by its long name because heap-stats do not
   // get truncated.
   EXPECT_NE(nullptr, TestUtility::findCounter(*store_, name_1).get());
+  tls_.shutdownGlobalThreading();
   store_->shutdownThreading();
   tls_.shutdownThread();
 }
 
 class StatsThreadLocalStoreTestNoFixture : public testing::Test {
 protected:
+  StatsThreadLocalStoreTestNoFixture() : alloc_(symbol_table_), store_(alloc_) {
+    store_.addSink(sink_);
+
+    // Use a tag producer that will produce tags.
+    envoy::config::metrics::v3::StatsConfig stats_config;
+    store_.setTagProducer(std::make_unique<TagProducerImpl>(stats_config));
+  }
+
   ~StatsThreadLocalStoreTestNoFixture() override {
     if (threading_enabled_) {
-      store_->shutdownThreading();
+      tls_.shutdownGlobalThreading();
+      store_.shutdownThreading();
       tls_.shutdownThread();
     }
   }
 
-  void init(bool use_fakes) {
-    symbol_table_creator_test_peer_.setUseFakeSymbolTables(use_fakes);
-    symbol_table_ = SymbolTableCreator::makeSymbolTable();
-    alloc_ = std::make_unique<AllocatorImpl>(*symbol_table_);
-    store_ = std::make_unique<ThreadLocalStoreImpl>(*alloc_);
-    store_->addSink(sink_);
-
-    // Use a tag producer that will produce tags.
-    envoy::config::metrics::v3::StatsConfig stats_config;
-    store_->setTagProducer(std::make_unique<TagProducerImpl>(stats_config));
-  }
-
   void initThreading() {
     threading_enabled_ = true;
-    store_->initializeThreading(main_thread_dispatcher_, tls_);
+    store_.initializeThreading(main_thread_dispatcher_, tls_);
   }
 
   static constexpr size_t million_ = 1000 * 1000;
 
   MockSink sink_;
-  SymbolTablePtr symbol_table_;
-  std::unique_ptr<AllocatorImpl> alloc_;
-  std::unique_ptr<ThreadLocalStoreImpl> store_;
+  SymbolTableImpl symbol_table_;
+  AllocatorImpl alloc_;
+  ThreadLocalStoreImpl store_;
   NiceMock<Event::MockDispatcher> main_thread_dispatcher_;
   NiceMock<ThreadLocal::MockInstance> tls_;
-  TestUtil::SymbolTableCreatorTestPeer symbol_table_creator_test_peer_;
   bool threading_enabled_{false};
 };
 
 // Tests how much memory is consumed allocating 100k stats.
-TEST_F(StatsThreadLocalStoreTestNoFixture, MemoryWithoutTlsFakeSymbolTable) {
-  init(true);
-  TestUtil::MemoryTest memory_test;
-  TestUtil::forEachSampleStat(
-      100, [this](absl::string_view name) { store_->counterFromString(std::string(name)); });
-  EXPECT_MEMORY_EQ(memory_test.consumedBytes(), 1358576); // Jan 23, 2020
-  EXPECT_MEMORY_LE(memory_test.consumedBytes(), 1.4 * million_);
-}
-
-TEST_F(StatsThreadLocalStoreTestNoFixture, MemoryWithTlsFakeSymbolTable) {
-  init(true);
-  initThreading();
-  TestUtil::MemoryTest memory_test;
-  TestUtil::forEachSampleStat(
-      100, [this](absl::string_view name) { store_->counterFromString(std::string(name)); });
-  EXPECT_MEMORY_EQ(memory_test.consumedBytes(), 1498160); // Apr 8, 2020
-  EXPECT_MEMORY_LE(memory_test.consumedBytes(), 1.6 * million_);
-}
-
-// Tests how much memory is consumed allocating 100k stats.
 TEST_F(StatsThreadLocalStoreTestNoFixture, MemoryWithoutTlsRealSymbolTable) {
-  init(false);
   TestUtil::MemoryTest memory_test;
   TestUtil::forEachSampleStat(
-      100, [this](absl::string_view name) { store_->counterFromString(std::string(name)); });
-  EXPECT_MEMORY_EQ(memory_test.consumedBytes(), 689648); // Jan 23, 2020
+      100, true, [this](absl::string_view name) { store_.counterFromString(std::string(name)); });
+  EXPECT_MEMORY_EQ(memory_test.consumedBytes(), 688080); // July 2, 2020
   EXPECT_MEMORY_LE(memory_test.consumedBytes(), 0.75 * million_);
 }
 
 TEST_F(StatsThreadLocalStoreTestNoFixture, MemoryWithTlsRealSymbolTable) {
-  init(false);
   initThreading();
   TestUtil::MemoryTest memory_test;
   TestUtil::forEachSampleStat(
-      100, [this](absl::string_view name) { store_->counterFromString(std::string(name)); });
-  EXPECT_MEMORY_EQ(memory_test.consumedBytes(), 829232); // Apr 08, 2020
+      100, true, [this](absl::string_view name) { store_.counterFromString(std::string(name)); });
+  EXPECT_MEMORY_EQ(memory_test.consumedBytes(), 827616); // Sep 25, 2020
   EXPECT_MEMORY_LE(memory_test.consumedBytes(), 0.9 * million_);
 }
 
@@ -1118,6 +1373,7 @@ TEST_F(StatsThreadLocalStoreTest, ShuttingDown) {
   store_->counterFromString("c1");
   store_->gaugeFromString("g1", Gauge::ImportMode::Accumulate);
   store_->textReadoutFromString("t1");
+  tls_.shutdownGlobalThreading();
   store_->shutdownThreading();
   store_->counterFromString("c2");
   store_->gaugeFromString("g2", Gauge::ImportMode::Accumulate);
@@ -1137,6 +1393,7 @@ TEST_F(StatsThreadLocalStoreTest, ShuttingDown) {
   EXPECT_EQ(2L, TestUtility::findGauge(*store_, "g2").use_count());
   EXPECT_EQ(2L, TestUtility::findTextReadout(*store_, "t2").use_count());
 
+  tls_.shutdownGlobalThreading();
   store_->shutdownThreading();
   tls_.shutdownThread();
 }
@@ -1151,6 +1408,7 @@ TEST_F(StatsThreadLocalStoreTest, MergeDuringShutDown) {
   EXPECT_CALL(sink_, onHistogramComplete(Ref(h1), 1));
   h1.recordValue(1);
 
+  tls_.shutdownGlobalThreading();
   store_->shutdownThreading();
 
   // Validate that merge callback is called during shutdown and there is no ASSERT.
@@ -1158,21 +1416,24 @@ TEST_F(StatsThreadLocalStoreTest, MergeDuringShutDown) {
   store_->mergeHistograms([&merge_called]() -> void { merge_called = true; });
 
   EXPECT_TRUE(merge_called);
+  tls_.shutdownGlobalThreading();
   store_->shutdownThreading();
   tls_.shutdownThread();
 }
 
 TEST(ThreadLocalStoreThreadTest, ConstructDestruct) {
-  SymbolTablePtr symbol_table(SymbolTableCreator::makeSymbolTable());
+  SymbolTableImpl symbol_table;
   Api::ApiPtr api = Api::createApiForTest();
   Event::DispatcherPtr dispatcher = api->allocateDispatcher("test_thread");
   NiceMock<ThreadLocal::MockInstance> tls;
-  AllocatorImpl alloc(*symbol_table);
+  AllocatorImpl alloc(symbol_table);
   ThreadLocalStoreImpl store(alloc);
 
   store.initializeThreading(*dispatcher, tls);
   { ScopePtr scope1 = store.createScope("scope1."); }
+  tls.shutdownGlobalThreading();
   store.shutdownThreading();
+  tls.shutdownThread();
 }
 
 // Histogram tests
@@ -1363,85 +1624,36 @@ TEST_F(HistogramTest, ParentHistogramBucketSummary) {
             parent_histogram->bucketSummary());
 }
 
-class ClusterShutdownCleanupStarvationTest : public ThreadLocalStoreNoMocksTestBase {
-public:
-  static constexpr uint32_t NumThreads = 2;
+class ThreadLocalRealThreadsTestBase : public Thread::RealThreadsTestHelper,
+                                       public ThreadLocalStoreNoMocksTestBase {
+protected:
   static constexpr uint32_t NumScopes = 1000;
   static constexpr uint32_t NumIters = 35;
 
-  // Helper class to block on a number of multi-threaded operations occurring.
-  class BlockingBarrier {
-  public:
-    explicit BlockingBarrier(uint32_t count) : blocking_counter_(count) {}
-    ~BlockingBarrier() { blocking_counter_.Wait(); }
-
-    /**
-     * Returns a function that first executes 'f', and then decrements the count
-     * toward unblocking the scope. This is intended to be used as a post() callback.
-     *
-     * @param f the function to run prior to decrementing the count.
-     */
-    std::function<void()> run(std::function<void()> f) {
-      return [this, f]() {
-        f();
-        decrementCount();
-      };
-    }
-
-    /**
-     * @return a function that, when run, decrements the count, intended for passing to post().
-     */
-    std::function<void()> decrementCountFn() {
-      return [this] { decrementCount(); };
-    }
-
-    void decrementCount() { blocking_counter_.DecrementCount(); }
-
-  private:
-    absl::BlockingCounter blocking_counter_;
-  };
-
-  ClusterShutdownCleanupStarvationTest()
-      : start_time_(time_system_.monotonicTime()), api_(Api::createApiForTest()),
-        thread_factory_(api_->threadFactory()), pool_(store_->symbolTable()),
-        my_counter_name_(pool_.add("my_counter")),
-        my_counter_scoped_name_(pool_.add("scope.my_counter")) {
-    // This is the same order as InstanceImpl::initialize in source/server/server.cc.
-    thread_dispatchers_.resize(NumThreads);
-    {
-      BlockingBarrier blocking_barrier(NumThreads + 1);
-      main_thread_ = thread_factory_.createThread(
-          [this, &blocking_barrier]() { mainThreadFn(blocking_barrier); });
-      for (uint32_t i = 0; i < NumThreads; ++i) {
-        threads_.emplace_back(thread_factory_.createThread(
-            [this, i, &blocking_barrier]() { workerThreadFn(i, blocking_barrier); }));
-      }
-    }
-
-    {
-      BlockingBarrier blocking_barrier(1);
-      main_dispatcher_->post(blocking_barrier.run([this]() {
-        tls_ = std::make_unique<ThreadLocal::InstanceImpl>();
-        tls_->registerThread(*main_dispatcher_, true);
-        for (Event::DispatcherPtr& dispatcher : thread_dispatchers_) {
-          // Worker threads must be registered from the main thread, per assert in registerThread().
-          tls_->registerThread(*dispatcher, false);
-        }
-        store_->initializeThreading(*main_dispatcher_, *tls_);
-      }));
-    }
+public:
+  ThreadLocalRealThreadsTestBase(uint32_t num_threads)
+      : RealThreadsTestHelper(num_threads), pool_(store_->symbolTable()) {
+    runOnMainBlocking([this]() { store_->initializeThreading(*main_dispatcher_, *tls_); });
   }
 
-  ~ClusterShutdownCleanupStarvationTest() override {
-    {
-      BlockingBarrier blocking_barrier(1);
-      main_dispatcher_->post(blocking_barrier.run([this]() {
-        store_->shutdownThreading();
-        tls_->shutdownGlobalThreading();
-        tls_->shutdownThread();
-      }));
-    }
+  ~ThreadLocalRealThreadsTestBase() override {
+    // TODO(chaoqin-li1123): clean this up when we figure out how to free the threading resources in
+    // RealThreadsTestHelper.
+    shutdownThreading();
+    exitThreads();
+  }
 
+  void shutdownThreading() {
+    runOnMainBlocking([this]() {
+      if (!tls_->isShutdown()) {
+        tls_->shutdownGlobalThreading();
+      }
+      store_->shutdownThreading();
+      tls_->shutdownThread();
+    });
+  }
+
+  void exitThreads() {
     for (Event::DispatcherPtr& dispatcher : thread_dispatchers_) {
       dispatcher->post([&dispatcher]() { dispatcher->exit(); });
     }
@@ -1458,6 +1670,18 @@ public:
     main_thread_->join();
   }
 
+  StatNamePool pool_;
+};
+
+class ClusterShutdownCleanupStarvationTest : public ThreadLocalRealThreadsTestBase {
+protected:
+  static constexpr uint32_t NumThreads = 2;
+
+  ClusterShutdownCleanupStarvationTest()
+      : ThreadLocalRealThreadsTestBase(NumThreads), my_counter_name_(pool_.add("my_counter")),
+        my_counter_scoped_name_(pool_.add("scope.my_counter")),
+        start_time_(time_system_.monotonicTime()) {}
+
   void createScopesIncCountersAndCleanup() {
     for (uint32_t i = 0; i < NumScopes; ++i) {
       ScopePtr scope = store_->createScope("scope.");
@@ -1466,25 +1690,9 @@ public:
     }
   }
 
-  void workerThreadFn(uint32_t thread_index, BlockingBarrier& blocking_barrier) {
-    thread_dispatchers_[thread_index] =
-        api_->allocateDispatcher(absl::StrCat("test_worker_", thread_index));
-    blocking_barrier.decrementCount();
-    thread_dispatchers_[thread_index]->run(Event::Dispatcher::RunType::RunUntilExit);
-  }
-
-  void mainThreadFn(BlockingBarrier& blocking_barrier) {
-    main_dispatcher_ = api_->allocateDispatcher("test_main_thread");
-    blocking_barrier.decrementCount();
-    main_dispatcher_->run(Event::Dispatcher::RunType::RunUntilExit);
-  }
-
   void createScopesIncCountersAndCleanupAllThreads() {
-    BlockingBarrier blocking_barrier(NumThreads);
-    for (Event::DispatcherPtr& thread_dispatcher : thread_dispatchers_) {
-      thread_dispatcher->post(
-          blocking_barrier.run([this]() { createScopesIncCountersAndCleanup(); }));
-    }
+
+    runOnAllWorkersBlocking([this]() { createScopesIncCountersAndCleanup(); });
   }
 
   std::chrono::seconds elapsedTime() {
@@ -1493,17 +1701,9 @@ public:
   }
 
   Event::TestRealTimeSystem time_system_;
-  MonotonicTime start_time_;
-  Api::ApiPtr api_;
-  Event::DispatcherPtr main_dispatcher_;
-  std::vector<Event::DispatcherPtr> thread_dispatchers_;
-  Thread::ThreadFactory& thread_factory_;
-  std::unique_ptr<ThreadLocal::InstanceImpl> tls_;
-  Thread::ThreadPtr main_thread_;
-  std::vector<Thread::ThreadPtr> threads_;
-  StatNamePool pool_;
   StatName my_counter_name_;
   StatName my_counter_scoped_name_;
+  MonotonicTime start_time_;
 };
 
 // Tests the scenario where a cluster and stat are allocated in multiple
@@ -1514,24 +1714,14 @@ TEST_F(ClusterShutdownCleanupStarvationTest, TwelveThreadsWithBlockade) {
   for (uint32_t i = 0; i < NumIters && elapsedTime() < std::chrono::seconds(5); ++i) {
     createScopesIncCountersAndCleanupAllThreads();
 
-    // To ensure all stats are freed we have to wait for a few posts() to clear.
     // First, wait for the main-dispatcher to initiate the cross-thread TLS cleanup.
-    auto main_dispatch_block = [this]() {
-      BlockingBarrier blocking_barrier(1);
-      main_dispatcher_->post(blocking_barrier.run([]() {}));
-    };
-    main_dispatch_block();
+    mainDispatchBlock();
 
     // Next, wait for all the worker threads to complete their TLS cleanup.
-    {
-      BlockingBarrier blocking_barrier(NumThreads);
-      for (Event::DispatcherPtr& thread_dispatcher : thread_dispatchers_) {
-        thread_dispatcher->post(blocking_barrier.run([]() {}));
-      }
-    }
+    tlsBlock();
 
     // Finally, wait for the final central-cache cleanup, which occurs on the main thread.
-    main_dispatch_block();
+    mainDispatchBlock();
 
     // Here we show that the counter cleanups have finished, because the use-count is 1.
     CounterSharedPtr counter =
@@ -1566,6 +1756,121 @@ TEST_F(ClusterShutdownCleanupStarvationTest, TwelveThreadsWithoutBlockade) {
   }
   EXPECT_EQ(70000, NumThreads * NumScopes * NumIters);
   store_->sync().signal(ThreadLocalStoreImpl::MainDispatcherCleanupSync);
+}
+
+class HistogramThreadTest : public ThreadLocalRealThreadsTestBase {
+protected:
+  static constexpr uint32_t NumThreads = 10;
+
+  HistogramThreadTest() : ThreadLocalRealThreadsTestBase(NumThreads) {}
+
+  void mergeHistograms() {
+    BlockingBarrier blocking_barrier(1);
+    runOnMainBlocking([this, &blocking_barrier]() {
+      store_->mergeHistograms(blocking_barrier.decrementCountFn());
+    });
+  }
+
+  uint32_t numTlsHistograms() {
+    uint32_t num;
+    {
+      BlockingBarrier blocking_barrier(1);
+      runOnMainBlocking([this, &num, &blocking_barrier]() {
+        ThreadLocalStoreTestingPeer::numTlsHistograms(*store_,
+                                                      [&num, &blocking_barrier](uint32_t num_hist) {
+                                                        num = num_hist;
+                                                        blocking_barrier.decrementCount();
+                                                      });
+      });
+    }
+    return num;
+  }
+
+  // Executes a function on every worker thread dispatcher.
+  void foreachThread(const std::function<void()>& fn) {
+    runOnAllWorkersBlocking([&fn]() { fn(); });
+  }
+};
+
+TEST_F(HistogramThreadTest, MakeHistogramsAndRecordValues) {
+  foreachThread([this]() {
+    Histogram& histogram =
+        store_->histogramFromString("my_hist", Stats::Histogram::Unit::Unspecified);
+    histogram.recordValue(42);
+  });
+
+  mergeHistograms();
+
+  auto histograms = store_->histograms();
+  ASSERT_EQ(1, histograms.size());
+  ParentHistogramSharedPtr hist = histograms[0];
+  EXPECT_THAT(hist->bucketSummary(),
+              HasSubstr(absl::StrCat(" B25(0,0) B50(", NumThreads, ",", NumThreads, ") ")));
+}
+
+TEST_F(HistogramThreadTest, ScopeOverlap) {
+  // Creating two scopes with the same name gets you two distinct scope objects.
+  ScopePtr scope1 = store_->createScope("scope.");
+  ScopePtr scope2 = store_->createScope("scope.");
+  EXPECT_NE(scope1, scope2);
+
+  EXPECT_EQ(0, store_->histograms().size());
+  EXPECT_EQ(0, numTlsHistograms());
+
+  // Histograms created in the two same-named scopes will be the same objects.
+  foreachThread([&scope1, &scope2]() {
+    Histogram& histogram = scope1->histogramFromString("histogram", Histogram::Unit::Unspecified);
+    EXPECT_EQ(&histogram, &scope2->histogramFromString("histogram", Histogram::Unit::Unspecified));
+    histogram.recordValue(100);
+  });
+
+  mergeHistograms();
+
+  // Verify that we have the expected number of TLS histograms since we accessed
+  // the histogram on every thread.
+  std::vector<ParentHistogramSharedPtr> histograms = store_->histograms();
+  ASSERT_EQ(1, histograms.size());
+  EXPECT_EQ(NumThreads, numTlsHistograms());
+
+  // There's no convenient API to pull data out of the histogram, except as
+  // a string. This expectation captures the bucket transition to indicate
+  // 0 samples at less than 100, and 10 between 100 and 249 inclusive.
+  EXPECT_THAT(histograms[0]->bucketSummary(),
+              HasSubstr(absl::StrCat(" B100(0,0) B250(", NumThreads, ",", NumThreads, ") ")));
+
+  // The histogram was created in scope1, which can now be destroyed. But the
+  // histogram is kept alive by scope2.
+  scope1.reset();
+  histograms = store_->histograms();
+  EXPECT_EQ(1, histograms.size());
+  EXPECT_EQ(NumThreads, numTlsHistograms());
+
+  // We can continue to accumulate samples at the scope2's view of the same
+  // histogram, and they will combine with the existing data, despite the
+  // fact that scope1 has been deleted.
+  foreachThread([&scope2]() {
+    Histogram& histogram = scope2->histogramFromString("histogram", Histogram::Unit::Unspecified);
+    histogram.recordValue(300);
+  });
+
+  mergeHistograms();
+
+  // Shows the bucket summary with 10 samples at >=100, and 20 at >=250.
+  EXPECT_THAT(histograms[0]->bucketSummary(),
+              HasSubstr(absl::StrCat(" B100(0,0) B250(0,", NumThreads, ") B500(", NumThreads, ",",
+                                     2 * NumThreads, ") ")));
+
+  // Now clear everything, and synchronize the system by calling mergeHistograms().
+  // There should be no more ParentHistograms or TlsHistograms.
+  scope2.reset();
+  histograms.clear();
+  mergeHistograms();
+
+  EXPECT_EQ(0, store_->histograms().size());
+  EXPECT_EQ(0, numTlsHistograms());
+
+  shutdownThreading();
+  store_->histogramFromString("histogram_after_shutdown", Histogram::Unit::Unspecified);
 }
 
 } // namespace Stats

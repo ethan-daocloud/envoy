@@ -6,8 +6,8 @@
 
 #include "envoy/upstream/cluster_manager.h"
 
-#include "extensions/filters/network/common/redis/client.h"
-#include "extensions/filters/network/common/redis/codec.h"
+#include "source/extensions/filters/network/common/redis/client.h"
+#include "source/extensions/filters/network/common/redis/codec.h"
 
 #include "absl/types/variant.h"
 
@@ -62,14 +62,6 @@ public:
    */
   virtual Common::Redis::Client::PoolRequest*
   makeRequest(const std::string& hash_key, RespVariant&& request, PoolCallbacks& callbacks) PURE;
-
-  /**
-   * Notify the redirection manager singleton that a redirection error has been received from an
-   * upstream server associated with the pool's associated cluster.
-   * @return bool true if a cluster's registered callback with the redirection manager is scheduled
-   * to be called from the main thread dispatcher, false otherwise.
-   */
-  virtual bool onRedirection() PURE;
 };
 
 using InstanceSharedPtr = std::shared_ptr<Instance>;

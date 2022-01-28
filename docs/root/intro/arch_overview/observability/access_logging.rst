@@ -26,6 +26,8 @@ Envoy supports several built-in
 :ref:`extension filters<envoy_v3_api_field_config.accesslog.v3.AccessLogFilter.extension_filter>`
 that are registered at runtime.
 
+.. _arch_overview_access_logs_sinks:
+
 Access logging sinks
 --------------------
 
@@ -44,6 +46,26 @@ gRPC
 
 * Envoy can send access log messages to a gRPC access logging service.
 
+
+Stdout
+*********
+
+* Asynchronous IO flushing architecture. Access logging will never block the main network processing
+  threads.
+* Customizable access log formats using predefined fields as well as arbitrary HTTP request and
+  response headers.
+* Writes to the standard output of the process. It works in all platforms.
+
+
+Stderr
+********
+
+* Asynchronous IO flushing architecture. Access logging will never block the main network processing
+  threads.
+* Customizable access log formats using predefined fields as well as arbitrary HTTP request and
+  response headers.
+* Writes to the standard error of the process. It works in all platforms.
+
 Further reading
 ---------------
 
@@ -51,3 +73,6 @@ Further reading
 * File :ref:`access log sink <envoy_v3_api_msg_extensions.access_loggers.file.v3.FileAccessLog>`.
 * gRPC :ref:`Access Log Service (ALS) <envoy_v3_api_msg_extensions.access_loggers.grpc.v3.HttpGrpcAccessLogConfig>`
   sink.
+* OpenTelemetry (gRPC) :ref:`LogsService <envoy_v3_api_msg_extensions.access_loggers.open_telemetry.v3.OpenTelemetryAccessLogConfig>`
+* Stdout :ref:`access log sink <envoy_v3_api_msg_extensions.access_loggers.stream.v3.StdoutAccessLog>`
+* Stderr :ref:`access log sink <envoy_v3_api_msg_extensions.access_loggers.stream.v3.StderrAccessLog>`

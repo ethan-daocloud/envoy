@@ -1,4 +1,4 @@
-#include "common/runtime/runtime_features.h"
+#include "source/common/runtime/runtime_features.h"
 
 #include "absl/strings/match.h"
 
@@ -16,7 +16,7 @@ bool runtimeFeatureEnabled(absl::string_view feature) {
     return Runtime::LoaderSingleton::getExisting()->threadsafeSnapshot()->runtimeFeatureEnabled(
         feature);
   }
-  ENVOY_LOG_TO_LOGGER(Envoy::Logger::Registry::getLog(Envoy::Logger::Id::runtime), warn,
+  ENVOY_LOG_TO_LOGGER(Envoy::Logger::Registry::getLog(Envoy::Logger::Id::runtime), debug,
                       "Unable to use runtime singleton for feature {}", feature);
   return RuntimeFeaturesDefaults::get().enabledByDefault(feature);
 }
@@ -27,7 +27,7 @@ uint64_t getInteger(absl::string_view feature, uint64_t default_value) {
     return Runtime::LoaderSingleton::getExisting()->threadsafeSnapshot()->getInteger(
         std::string(feature), default_value);
   }
-  ENVOY_LOG_TO_LOGGER(Envoy::Logger::Registry::getLog(Envoy::Logger::Id::runtime), warn,
+  ENVOY_LOG_TO_LOGGER(Envoy::Logger::Registry::getLog(Envoy::Logger::Id::runtime), debug,
                       "Unable to use runtime singleton for feature {}", feature);
   return default_value;
 }
@@ -51,19 +51,46 @@ uint64_t getInteger(absl::string_view feature, uint64_t default_value) {
 // If issues are found that require a runtime feature to be disabled, it should be reported
 // ASAP by filing a bug on github. Overriding non-buggy code is strongly discouraged to avoid the
 // problem of the bugs being found after the old code path has been removed.
+// clang-format off
 constexpr const char* runtime_features[] = {
     // Enabled
-    "envoy.reloadable_features.http1_flood_protection",
     "envoy.reloadable_features.test_feature_true",
-    "envoy.reloadable_features.strict_header_validation",
-    "envoy.reloadable_features.connection_header_sanitization",
-    "envoy.reloadable_features.strict_authority_validation",
-    "envoy.reloadable_features.reject_unsupported_transfer_encodings",
-    "envoy.deprecated_features.allow_deprecated_extension_names",
-    "envoy.reloadable_features.ext_authz_http_service_enable_case_sensitive_string_matcher",
-    "envoy.reloadable_features.fix_upgrade_response",
-    "envoy.reloadable_features.listener_in_place_filterchain_update",
+    // Begin alphabetically sorted section.
+    "envoy.reloadable_features.allow_response_for_timeout",
+    "envoy.reloadable_features.allow_upstream_inline_write",
+    "envoy.reloadable_features.conn_pool_delete_when_idle",
+    "envoy.reloadable_features.correct_scheme_and_xfp",
+    "envoy.reloadable_features.correctly_validate_alpn",
+    "envoy.reloadable_features.disable_tls_inspector_injection",
+    "envoy.reloadable_features.enable_grpc_async_client_cache",
+    "envoy.reloadable_features.fix_added_trailers",
+    "envoy.reloadable_features.handle_stream_reset_during_hcm_encoding",
+    "envoy.reloadable_features.http2_allow_capacity_increase_by_settings",
+    "envoy.reloadable_features.http2_new_codec_wrapper",
+    "envoy.reloadable_features.http_ext_authz_do_not_skip_direct_response_and_redirect",
+    "envoy.reloadable_features.http_reject_path_with_fragment",
+    "envoy.reloadable_features.http_strip_fragment_from_path_unsafe_if_disabled",
+    "envoy.reloadable_features.internal_address",
+    "envoy.reloadable_features.internal_redirects_with_body",
+    "envoy.reloadable_features.listener_reuse_port_default_enabled",
+    "envoy.reloadable_features.listener_wildcard_match_ip_family",
+    "envoy.reloadable_features.new_tcp_connection_pool",
+    "envoy.reloadable_features.proxy_102_103",
+    "envoy.reloadable_features.remove_legacy_json",
+    "envoy.reloadable_features.support_locality_update_on_eds_cluster_endpoints",
+    "envoy.reloadable_features.udp_listener_updates_filter_chain_in_place",
+    "envoy.reloadable_features.update_expected_rq_timeout_on_retry",
+    "envoy.reloadable_features.use_dns_ttl",
+    "envoy.reloadable_features.validate_connect",
+    "envoy.reloadable_features.vhds_heartbeats",
+    "envoy.restart_features.explicit_wildcard_resource",
+    "envoy.restart_features.use_apple_api_for_dns_lookups",
+    // Misplaced flags: please do not add flags to this section.
+    "envoy.reloadable_features.sanitize_http_header_referer",
+    "envoy.reloadable_features.skip_dispatching_frames_for_closed_connection",
+    // End misplaced flags: please do not add flags in this section.
 };
+// clang-format on
 
 // This is a section for officially sanctioned runtime features which are too
 // high risk to be enabled by default. Examples where we have opted to land
@@ -74,8 +101,12 @@ constexpr const char* runtime_features[] = {
 // When features are added here, there should be a tracking bug assigned to the
 // code owner to flip the default after sufficient testing.
 constexpr const char* disabled_runtime_features[] = {
+    // TODO(alyssawilk, junr03) flip (and add release notes + docs) these after Lyft tests
+    "envoy.reloadable_features.allow_multiple_dns_addresses",
     // Sentinel and test flag.
     "envoy.reloadable_features.test_feature_false",
+    // TODO(dmitri-d) reset to true to enable unified mux by default
+    "envoy.reloadable_features.unified_mux",
 };
 
 RuntimeFeatures::RuntimeFeatures() {

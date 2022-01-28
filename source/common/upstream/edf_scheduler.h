@@ -1,9 +1,11 @@
 #pragma once
-
 #include <cstdint>
+#include <iostream>
 #include <queue>
 
-#include "common/common/assert.h"
+#include "envoy/upstream/scheduler.h"
+
+#include "source/common/common/assert.h"
 
 namespace Envoy {
 namespace Upstream {
@@ -23,19 +25,61 @@ namespace Upstream {
 // Each pick from the schedule has the earliest deadline entry selected. Entries have deadlines set
 // at current time + 1 / weight, providing weighted round robin behavior with floating point
 // weights and an O(log n) pick time.
-template <class C> class EdfScheduler {
+template <class C> class EdfScheduler : public Scheduler<C> {
 public:
+  // See scheduler.h for an explanation of each public method.
+  std::shared_ptr<C> peekAgain(std::function<double(const C&)> calculate_weight) override {
+    if (hasEntry()) {
+      prepick_list_.push_back(std::move(queue_.top().entry_));
+      std::shared_ptr<C> ret{prepick_list_.back()};
+      add(calculate_weight(*ret), ret);
+      queue_.pop();
+      return ret;
+    }
+    return nullptr;
+  }
+
+  std::shared_ptr<C> pickAndAdd(std::function<double(const C&)> calculate_weight) override {
+    while (!prepick_list_.empty()) {
+      // In this case the entry was added back during peekAgain so don't re-add.
+      if (prepick_list_.front().expired()) {
+        prepick_list_.pop_front();
+        continue;
+      }
+      std::shared_ptr<C> ret{prepick_list_.front()};
+      prepick_list_.pop_front();
+      return ret;
+    }
+    if (hasEntry()) {
+      std::shared_ptr<C> ret{queue_.top().entry_};
+      queue_.pop();
+      add(calculate_weight(*ret), ret);
+      return ret;
+    }
+    return nullptr;
+  }
+
+  void add(double weight, std::shared_ptr<C> entry) override {
+    ASSERT(weight > 0);
+    const double deadline = current_time_ + 1.0 / weight;
+    EDF_TRACE("Insertion {} in queue with deadline {} and weight {}.",
+              static_cast<const void*>(entry.get()), deadline, weight);
+    queue_.push({deadline, order_offset_++, entry});
+    ASSERT(queue_.top().deadline_ >= current_time_);
+  }
+
+  bool empty() const override { return queue_.empty(); }
+
+private:
   /**
-   * Pick queue entry with closest deadline.
-   * @return std::shared_ptr<C> to the queue entry if a valid entry exists in the queue, nullptr
-   *         otherwise. The entry is removed from the queue.
+   * Clears expired entries, and returns true if there's still entries in the queue.
    */
-  std::shared_ptr<C> pick() {
+  bool hasEntry() {
     EDF_TRACE("Queue pick: queue_.size()={}, current_time_={}.", queue_.size(), current_time_);
     while (true) {
       if (queue_.empty()) {
         EDF_TRACE("Queue is empty.");
-        return nullptr;
+        return false;
       }
       const EdfEntry& edf_entry = queue_.top();
       // Entry has been removed, let's see if there's another one.
@@ -47,33 +91,11 @@ public:
       std::shared_ptr<C> ret{edf_entry.entry_};
       ASSERT(edf_entry.deadline_ >= current_time_);
       current_time_ = edf_entry.deadline_;
-      queue_.pop();
       EDF_TRACE("Picked {}, current_time_={}.", static_cast<const void*>(ret.get()), current_time_);
-      return ret;
+      return true;
     }
   }
 
-  /**
-   * Insert entry into queue with a given weight. The deadline will be current_time_ + 1 / weight.
-   * @param weight floating point weight.
-   * @param entry shared pointer to entry, only a weak reference will be retained.
-   */
-  void add(double weight, std::shared_ptr<C> entry) {
-    ASSERT(weight > 0);
-    const double deadline = current_time_ + 1.0 / weight;
-    EDF_TRACE("Insertion {} in queue with deadline {} and weight {}.",
-              static_cast<const void*>(entry.get()), deadline, weight);
-    queue_.push({deadline, order_offset_++, entry});
-    ASSERT(queue_.top().deadline_ >= current_time_);
-  }
-
-  /**
-   * Implements empty() on the internal queue. Does not attempt to discard expired elements.
-   * @return bool whether or not the internal queue is empty.
-   */
-  bool empty() const { return queue_.empty(); }
-
-private:
   struct EdfEntry {
     double deadline_;
     // Tie breaker for entries with the same deadline. This is used to provide FIFO behavior.
@@ -98,6 +120,7 @@ private:
   uint64_t order_offset_{};
   // Min priority queue for EDF.
   std::priority_queue<EdfEntry> queue_;
+  std::list<std::weak_ptr<C>> prepick_list_;
 };
 
 #undef EDF_DEBUG

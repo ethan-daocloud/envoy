@@ -6,9 +6,9 @@
 #include "envoy/http/header_map.h"
 #include "envoy/type/v3/percent.pb.h"
 
-#include "common/http/codes.h"
-#include "common/http/headers.h"
-#include "common/singleton/const_singleton.h"
+#include "source/common/http/codes.h"
+#include "source/common/http/headers.h"
+#include "source/common/singleton/const_singleton.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -18,7 +18,7 @@ namespace Fault {
 
 class HeaderNameValues {
 public:
-  const char* prefix() { return ThreadSafeSingleton<Http::PrefixValue>::get().prefix(); }
+  const char* prefix() const { return ThreadSafeSingleton<Http::PrefixValue>::get().prefix(); }
 
   const Http::LowerCaseString AbortRequest{absl::StrCat(prefix(), "-fault-abort-request")};
   const Http::LowerCaseString AbortRequestPercentage{

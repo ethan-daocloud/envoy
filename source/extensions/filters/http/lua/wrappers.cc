@@ -1,8 +1,8 @@
-#include "extensions/filters/http/lua/wrappers.h"
+#include "source/extensions/filters/http/lua/wrappers.h"
 
-#include "common/http/utility.h"
-
-#include "extensions/filters/common/lua/wrappers.h"
+#include "source/common/http/header_utility.h"
+#include "source/common/http/utility.h"
+#include "source/extensions/filters/common/lua/wrappers.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -11,13 +11,10 @@ namespace Lua {
 
 HeaderMapIterator::HeaderMapIterator(HeaderMapWrapper& parent) : parent_(parent) {
   entries_.reserve(parent_.headers_.size());
-  parent_.headers_.iterate(
-      [](const Http::HeaderEntry& header, void* context) -> Http::HeaderMap::Iterate {
-        HeaderMapIterator* iterator = static_cast<HeaderMapIterator*>(context);
-        iterator->entries_.push_back(&header);
-        return Http::HeaderMap::Iterate::Continue;
-      },
-      this);
+  parent_.headers_.iterate([this](const Http::HeaderEntry& header) -> Http::HeaderMap::Iterate {
+    entries_.push_back(&header);
+    return Http::HeaderMap::Iterate::Continue;
+  });
 }
 
 int HeaderMapIterator::luaPairsIterator(lua_State* state) {
@@ -44,15 +41,34 @@ int HeaderMapWrapper::luaAdd(lua_State* state) {
 }
 
 int HeaderMapWrapper::luaGet(lua_State* state) {
-  const char* key = luaL_checkstring(state, 2);
-  const Http::HeaderEntry* entry = headers_.get(Http::LowerCaseString(key));
-  if (entry != nullptr) {
-    lua_pushlstring(state, entry->value().getStringView().data(),
-                    entry->value().getStringView().length());
+  absl::string_view key = Filters::Common::Lua::getStringViewFromLuaString(state, 2);
+  const Http::HeaderUtility::GetAllOfHeaderAsStringResult value =
+      Http::HeaderUtility::getAllOfHeaderAsString(headers_, Http::LowerCaseString(key));
+  if (value.result().has_value()) {
+    lua_pushlstring(state, value.result().value().data(), value.result().value().length());
     return 1;
   } else {
     return 0;
   }
+}
+
+int HeaderMapWrapper::luaGetAtIndex(lua_State* state) {
+  absl::string_view key = Filters::Common::Lua::getStringViewFromLuaString(state, 2);
+  const int index = luaL_checknumber(state, 3);
+  const Http::HeaderMap::GetResult header_value = headers_.get(Http::LowerCaseString(key));
+  if (index >= 0 && header_value.size() > static_cast<uint64_t>(index)) {
+    absl::string_view value = header_value[index]->value().getStringView();
+    lua_pushlstring(state, value.data(), value.length());
+    return 1;
+  }
+  return 0;
+}
+
+int HeaderMapWrapper::luaGetNumValues(lua_State* state) {
+  absl::string_view key = Filters::Common::Lua::getStringViewFromLuaString(state, 2);
+  const Http::HeaderMap::GetResult header_value = headers_.get(Http::LowerCaseString(key));
+  lua_pushnumber(state, header_value.size());
+  return 1;
 }
 
 int HeaderMapWrapper::luaPairs(lua_State* state) {
@@ -113,6 +129,38 @@ int StreamInfoWrapper::luaDynamicMetadata(lua_State* state) {
   } else {
     dynamic_metadata_wrapper_.reset(DynamicMetadataMapWrapper::create(state, *this), true);
   }
+  return 1;
+}
+
+int StreamInfoWrapper::luaDownstreamSslConnection(lua_State* state) {
+  const auto& ssl = stream_info_.downstreamAddressProvider().sslConnection();
+  if (ssl != nullptr) {
+    if (downstream_ssl_connection_.get() != nullptr) {
+      downstream_ssl_connection_.pushStack();
+    } else {
+      downstream_ssl_connection_.reset(
+          Filters::Common::Lua::SslConnectionWrapper::create(state, *ssl), true);
+    }
+  } else {
+    lua_pushnil(state);
+  }
+  return 1;
+}
+
+int StreamInfoWrapper::luaDownstreamLocalAddress(lua_State* state) {
+  lua_pushstring(state,
+                 stream_info_.downstreamAddressProvider().localAddress()->asString().c_str());
+  return 1;
+}
+
+int StreamInfoWrapper::luaDownstreamDirectRemoteAddress(lua_State* state) {
+  lua_pushstring(
+      state, stream_info_.downstreamAddressProvider().directRemoteAddress()->asString().c_str());
+  return 1;
+}
+
+int StreamInfoWrapper::luaRequestedServerName(lua_State* state) {
+  lua_pushstring(state, stream_info_.downstreamAddressProvider().requestedServerName().data());
   return 1;
 }
 
@@ -178,16 +226,10 @@ int DynamicMetadataMapWrapper::luaPairs(lua_State* state) {
 }
 
 int PublicKeyWrapper::luaGet(lua_State* state) {
-  if (public_key_ == nullptr || public_key_.get() == nullptr) {
+  if (public_key_.empty()) {
     lua_pushnil(state);
   } else {
-    auto wrapper = Common::Crypto::Access::getTyped<Common::Crypto::PublicKeyObject>(*public_key_);
-    EVP_PKEY* pkey = wrapper->getEVP_PKEY();
-    if (pkey == nullptr) {
-      lua_pushnil(state);
-    } else {
-      lua_pushlightuserdata(state, public_key_.get());
-    }
+    lua_pushstring(state, public_key_.c_str());
   }
   return 1;
 }

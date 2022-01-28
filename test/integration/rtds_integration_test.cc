@@ -1,7 +1,9 @@
 #include "envoy/service/runtime/v3/rtds.pb.h"
 
 #include "test/common/grpc/grpc_client_integration.h"
+#include "test/config/v2_link_hacks.h"
 #include "test/integration/http_integration.h"
+#include "test/test_common/utility.h"
 
 #include "gtest/gtest.h"
 
@@ -15,7 +17,11 @@ std::string tdsBootstrapConfig(absl::string_view api_type) {
 static_resources:
   clusters:
   - name: dummy_cluster
-    http2_protocol_options: {{}}
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http2_protocol_options: {{}}
     load_assignment:
       cluster_name: dummy_cluster
       endpoints:
@@ -26,7 +32,11 @@ static_resources:
                 address: 127.0.0.1
                 port_value: 0
   - name: rtds_cluster
-    http2_protocol_options: {{}}
+    typed_extension_protocol_options:
+      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+        explicit_http_config:
+          http2_protocol_options: {{}}
     load_assignment:
       cluster_name: rtds_cluster
       endpoints:
@@ -46,52 +56,60 @@ layered_runtime:
     rtds_layer:
       name: some_rtds_layer
       rtds_config:
+        resource_api_version: V3
         api_config_source:
           api_type: {}
+          transport_api_version: V3
           grpc_services:
             envoy_grpc:
               cluster_name: rtds_cluster
-          set_node_on_first_message_only: false
+          set_node_on_first_message_only: true
   - name: some_admin_layer
     admin_layer: {{}}
 admin:
-  access_log_path: /dev/null
+  access_log:
+  - name: envoy.access_loggers.file
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
+      path: "{}"
   address:
     socket_address:
       address: 127.0.0.1
       port_value: 0
 )EOF",
-                     api_type);
+                     api_type, Platform::null_device_path);
 }
 
 class RtdsIntegrationTest : public Grpc::DeltaSotwIntegrationParamTest, public HttpIntegrationTest {
 public:
   RtdsIntegrationTest()
       : HttpIntegrationTest(
-            Http::CodecClient::Type::HTTP2, ipVersion(),
-            tdsBootstrapConfig(sotwOrDelta() == Grpc::SotwOrDelta::Sotw ? "GRPC" : "DELTA_GRPC")) {
+            Http::CodecType::HTTP2, ipVersion(),
+            tdsBootstrapConfig(sotwOrDelta() == Grpc::SotwOrDelta::Sotw ||
+                                       sotwOrDelta() == Grpc::SotwOrDelta::UnifiedSotw
+                                   ? "GRPC"
+                                   : "DELTA_GRPC")) {
+    if (sotwOrDelta() == Grpc::SotwOrDelta::UnifiedSotw ||
+        sotwOrDelta() == Grpc::SotwOrDelta::UnifiedDelta) {
+      config_helper_.addRuntimeOverride("envoy.reloadable_features.unified_mux", "true");
+    }
     use_lds_ = false;
     create_xds_upstream_ = true;
     sotw_or_delta_ = sotwOrDelta();
   }
 
-  void TearDown() override {
-    cleanUpXdsConnection();
-    test_server_.reset();
-    fake_upstreams_.clear();
-  }
+  void TearDown() override { cleanUpXdsConnection(); }
 
   void initialize() override {
     // The tests infra expects the xDS server to be the second fake upstream, so
     // we need a dummy data plane cluster.
     setUpstreamCount(1);
-    setUpstreamProtocol(FakeHttpConnection::Type::HTTP2);
+    setUpstreamProtocol(Http::CodecType::HTTP2);
     HttpIntegrationTest::initialize();
     // Register admin port.
     registerTestServerPorts({});
     initial_load_success_ = test_server_->counter("runtime.load_success")->value();
     initial_keys_ = test_server_->gauge("runtime.num_keys")->value();
-    fake_upstreams_[0]->set_allow_unexpected_disconnects(true);
   }
 
   void acceptXdsConnection() {
@@ -106,7 +124,7 @@ public:
     auto response = IntegrationUtil::makeSingleRequest(
         lookupPort("admin"), "GET", "/runtime?format=json", "", downstreamProtocol(), version_);
     EXPECT_TRUE(response->complete());
-    EXPECT_EQ("200", response->headers().Status()->value().getStringView());
+    EXPECT_EQ("200", response->headers().getStatusValue());
     Json::ObjectSharedPtr loader = TestEnvironment::jsonLoadFromString(response->body());
     auto entries = loader->getObject("entries");
     if (entries->hasObject(key)) {
@@ -167,7 +185,9 @@ TEST_P(RtdsIntegrationTest, RtdsReload) {
   EXPECT_EQ("saz", getRuntimeKey("baz"));
 
   EXPECT_EQ(0, test_server_->counter("runtime.load_error")->value());
+  EXPECT_EQ(0, test_server_->counter("runtime.update_failure")->value());
   EXPECT_EQ(initial_load_success_ + 2, test_server_->counter("runtime.load_success")->value());
+  EXPECT_EQ(2, test_server_->counter("runtime.update_success")->value());
   EXPECT_EQ(initial_keys_ + 1, test_server_->gauge("runtime.num_keys")->value());
   EXPECT_EQ(3, test_server_->gauge("runtime.num_layers")->value());
 }
@@ -228,7 +248,6 @@ TEST_P(RtdsIntegrationTest, RtdsAfterAsyncPrimaryClusterInitialization) {
   EXPECT_EQ(initial_load_success_ + 1, test_server_->counter("runtime.load_success")->value());
   EXPECT_EQ(initial_keys_ + 1, test_server_->gauge("runtime.num_keys")->value());
   EXPECT_EQ(3, test_server_->gauge("runtime.num_layers")->value());
-  cleanupUpstreamAndDownstream();
 }
 
 } // namespace

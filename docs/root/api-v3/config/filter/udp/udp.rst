@@ -5,5 +5,4 @@ UDP listener filters
   :glob:
   :maxdepth: 2
 
-  */v2alpha/*
-  ../../../extensions/filters/udp/*/v3alpha/*
+  ../../../extensions/filters/udp/*/v3/*

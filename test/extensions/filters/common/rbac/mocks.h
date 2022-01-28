@@ -2,7 +2,8 @@
 
 #include "envoy/config/rbac/v3/rbac.pb.h"
 
-#include "extensions/filters/common/rbac/engine_impl.h"
+#include "source/common/protobuf/message_validator_impl.h"
+#include "source/extensions/filters/common/rbac/engine_impl.h"
 
 #include "gmock/gmock.h"
 
@@ -14,16 +15,18 @@ namespace RBAC {
 
 class MockEngine : public RoleBasedAccessControlEngineImpl {
 public:
-  MockEngine(const envoy::config::rbac::v3::RBAC& rules)
-      : RoleBasedAccessControlEngineImpl(rules){};
+  MockEngine(const envoy::config::rbac::v3::RBAC& rules,
+             const EnforcementMode mode = EnforcementMode::Enforced)
+      : RoleBasedAccessControlEngineImpl(rules, ProtobufMessage::getStrictValidationVisitor(),
+                                         mode){};
 
-  MOCK_METHOD(bool, allowed,
+  MOCK_METHOD(bool, handleAction,
               (const Envoy::Network::Connection&, const Envoy::Http::RequestHeaderMap&,
-               const StreamInfo::StreamInfo&, std::string* effective_policy_id),
+               StreamInfo::StreamInfo&, std::string* effective_policy_id),
               (const));
 
-  MOCK_METHOD(bool, allowed,
-              (const Envoy::Network::Connection&, const StreamInfo::StreamInfo&,
+  MOCK_METHOD(bool, handleAction,
+              (const Envoy::Network::Connection&, StreamInfo::StreamInfo&,
                std::string* effective_policy_id),
               (const));
 };

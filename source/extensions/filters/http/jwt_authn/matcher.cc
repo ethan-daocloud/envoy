@@ -1,12 +1,12 @@
-#include "extensions/filters/http/jwt_authn/matcher.h"
+#include "source/extensions/filters/http/jwt_authn/matcher.h"
 
 #include "envoy/config/route/v3/route_components.pb.h"
 #include "envoy/extensions/filters/http/jwt_authn/v3/config.pb.h"
 
-#include "common/common/logger.h"
-#include "common/common/matchers.h"
-#include "common/common/regex.h"
-#include "common/router/config_impl.h"
+#include "source/common/common/logger.h"
+#include "source/common/common/matchers.h"
+#include "source/common/common/regex.h"
+#include "source/common/router/config_impl.h"
 
 #include "absl/strings/match.h"
 
@@ -42,7 +42,7 @@ public:
     matches &= Http::HeaderUtility::matchHeaders(headers, config_headers_);
     if (!config_query_parameters_.empty()) {
       Http::Utility::QueryParams query_parameters =
-          Http::Utility::parseQueryString(headers.Path()->value().getStringView());
+          Http::Utility::parseQueryString(headers.getPathValue());
       matches &= ConfigUtility::matchQueryParams(query_parameters, config_query_parameters_);
     }
     return matches;
@@ -66,8 +66,7 @@ public:
         path_matcher_(Matchers::PathMatcher::createPrefix(prefix_, !case_sensitive_)) {}
 
   bool matches(const Http::RequestHeaderMap& headers) const override {
-    if (BaseMatcherImpl::matchRoute(headers) &&
-        path_matcher_->match(headers.Path()->value().getStringView())) {
+    if (BaseMatcherImpl::matchRoute(headers) && path_matcher_->match(headers.getPathValue())) {
       ENVOY_LOG(debug, "Prefix requirement '{}' matched.", prefix_);
       return true;
     }
@@ -90,8 +89,7 @@ public:
         path_matcher_(Matchers::PathMatcher::createExact(path_, !case_sensitive_)) {}
 
   bool matches(const Http::RequestHeaderMap& headers) const override {
-    if (BaseMatcherImpl::matchRoute(headers) &&
-        path_matcher_->match(headers.Path()->value().getStringView())) {
+    if (BaseMatcherImpl::matchRoute(headers) && path_matcher_->match(headers.getPathValue())) {
       ENVOY_LOG(debug, "Path requirement '{}' matched.", path_);
       return true;
     }
@@ -110,19 +108,11 @@ private:
  */
 class RegexMatcherImpl : public BaseMatcherImpl {
 public:
-  RegexMatcherImpl(const RequirementRule& rule) : BaseMatcherImpl(rule) {
-    // TODO(yangminzhu): Use PathMatcher once hidden_envoy_deprecated_regex is removed.
-    if (rule.match().path_specifier_case() ==
-        envoy::config::route::v3::RouteMatch::PathSpecifierCase::kHiddenEnvoyDeprecatedRegex) {
-      regex_ = Regex::Utility::parseStdRegexAsCompiledMatcher(
-          rule.match().hidden_envoy_deprecated_regex());
-      regex_str_ = rule.match().hidden_envoy_deprecated_regex();
-    } else {
-      ASSERT(rule.match().path_specifier_case() ==
-             envoy::config::route::v3::RouteMatch::PathSpecifierCase::kSafeRegex);
-      regex_ = Regex::Utility::parseRegex(rule.match().safe_regex());
-      regex_str_ = rule.match().safe_regex().regex();
-    }
+  RegexMatcherImpl(const RequirementRule& rule)
+      : BaseMatcherImpl(rule), regex_str_(rule.match().safe_regex().regex()),
+        path_matcher_(Matchers::PathMatcher::createSafeRegex(rule.match().safe_regex())) {
+    ASSERT(rule.match().path_specifier_case() ==
+           envoy::config::route::v3::RouteMatch::PathSpecifierCase::kSafeRegex);
   }
 
   bool matches(const Http::RequestHeaderMap& headers) const override {
@@ -131,7 +121,7 @@ public:
       const absl::string_view query_string = Http::Utility::findQueryStringStart(path);
       absl::string_view path_view = path.getStringView();
       path_view.remove_suffix(query_string.length());
-      if (regex_->match(path_view)) {
+      if (path_matcher_->match(path_view)) {
         ENVOY_LOG(debug, "Regex requirement '{}' matched.", regex_str_);
         return true;
       }
@@ -140,11 +130,27 @@ public:
   }
 
 private:
-  Regex::CompiledMatcherPtr regex_;
   // raw regex string, for logging.
-  std::string regex_str_;
+  const std::string regex_str_;
+  const Matchers::PathMatcherConstSharedPtr path_matcher_;
 };
 
+/**
+ * Perform a match against an HTTP CONNECT request.
+ */
+class ConnectMatcherImpl : public BaseMatcherImpl {
+public:
+  ConnectMatcherImpl(const RequirementRule& rule) : BaseMatcherImpl(rule) {}
+
+  bool matches(const Http::RequestHeaderMap& headers) const override {
+    if (Http::HeaderUtility::isConnect(headers) && BaseMatcherImpl::matchRoute(headers)) {
+      ENVOY_LOG(debug, "CONNECT requirement matched.");
+      return true;
+    }
+
+    return false;
+  }
+};
 } // namespace
 
 MatcherConstPtr Matcher::create(const RequirementRule& rule) {
@@ -153,11 +159,10 @@ MatcherConstPtr Matcher::create(const RequirementRule& rule) {
     return std::make_unique<PrefixMatcherImpl>(rule);
   case RouteMatch::PathSpecifierCase::kPath:
     return std::make_unique<PathMatcherImpl>(rule);
-  case RouteMatch::PathSpecifierCase::kHiddenEnvoyDeprecatedRegex:
   case RouteMatch::PathSpecifierCase::kSafeRegex:
     return std::make_unique<RegexMatcherImpl>(rule);
-  // path specifier is required.
-  case RouteMatch::PathSpecifierCase::PATH_SPECIFIER_NOT_SET:
+  case RouteMatch::PathSpecifierCase::kConnectMatcher:
+    return std::make_unique<ConnectMatcherImpl>(rule);
   default:
     NOT_REACHED_GCOVR_EXCL_LINE;
   }

@@ -12,9 +12,9 @@
 #include "envoy/runtime/runtime.h"
 #include "envoy/stats/scope.h"
 
-#include "common/network/cidr_range.h"
-#include "common/network/lc_trie.h"
-#include "common/stats/symbol_table_impl.h"
+#include "source/common/network/cidr_range.h"
+#include "source/common/network/lc_trie.h"
+#include "source/common/stats/symbol_table_impl.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -36,7 +36,6 @@ public:
                         Runtime::Loader& runtime);
 
   Runtime::Loader& runtime() { return runtime_; }
-  Stats::Scope& scope() { return scope_; }
   FilterRequestType requestType() const { return request_type_; }
   const Network::LcTrie::LcTrie<std::string>& trie() const { return *trie_; }
 

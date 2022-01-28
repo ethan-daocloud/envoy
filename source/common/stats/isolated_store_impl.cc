@@ -1,20 +1,18 @@
-#include "common/stats/isolated_store_impl.h"
+#include "source/common/stats/isolated_store_impl.h"
 
 #include <algorithm>
 #include <cstring>
 #include <string>
 
-#include "common/common/utility.h"
-#include "common/stats/fake_symbol_table_impl.h"
-#include "common/stats/histogram_impl.h"
-#include "common/stats/scope_prefixer.h"
-#include "common/stats/symbol_table_creator.h"
-#include "common/stats/utility.h"
+#include "source/common/common/utility.h"
+#include "source/common/stats/histogram_impl.h"
+#include "source/common/stats/scope_prefixer.h"
+#include "source/common/stats/utility.h"
 
 namespace Envoy {
 namespace Stats {
 
-IsolatedStoreImpl::IsolatedStoreImpl() : IsolatedStoreImpl(SymbolTableCreator::makeSymbolTable()) {}
+IsolatedStoreImpl::IsolatedStoreImpl() : IsolatedStoreImpl(std::make_unique<SymbolTableImpl>()) {}
 
 IsolatedStoreImpl::IsolatedStoreImpl(std::unique_ptr<SymbolTable>&& symbol_table)
     : IsolatedStoreImpl(*symbol_table) {
@@ -39,6 +37,10 @@ IsolatedStoreImpl::IsolatedStoreImpl(SymbolTable& symbol_table)
       null_gauge_(new NullGaugeImpl(symbol_table)) {}
 
 ScopePtr IsolatedStoreImpl::createScope(const std::string& name) {
+  return std::make_unique<ScopePrefixer>(name, *this);
+}
+
+ScopePtr IsolatedStoreImpl::scopeFromStatName(StatName name) {
   return std::make_unique<ScopePrefixer>(name, *this);
 }
 

@@ -1,13 +1,13 @@
-#include "extensions/common/tap/tap_config_base.h"
+#include "source/extensions/common/tap/tap_config_base.h"
 
 #include "envoy/config/tap/v3/common.pb.h"
 #include "envoy/data/tap/v3/common.pb.h"
 #include "envoy/data/tap/v3/wrapper.pb.h"
 
-#include "common/common/assert.h"
-#include "common/protobuf/utility.h"
-
-#include "extensions/common/tap/tap_matcher.h"
+#include "source/common/common/assert.h"
+#include "source/common/common/fmt.h"
+#include "source/common/protobuf/utility.h"
+#include "source/extensions/common/matcher/matcher.h"
 
 #include "absl/container/fixed_array.h"
 
@@ -15,6 +15,8 @@ namespace Envoy {
 namespace Extensions {
 namespace Common {
 namespace Tap {
+
+using namespace Matcher;
 
 bool Utility::addBufferToProtoBytes(envoy::data::tap::v3::Body& output_body,
                                     uint32_t max_buffered_bytes, const Buffer::Instance& data,
@@ -42,7 +44,7 @@ bool Utility::addBufferToProtoBytes(envoy::data::tap::v3::Body& output_body,
   }
 }
 
-TapConfigBaseImpl::TapConfigBaseImpl(envoy::config::tap::v3::TapConfig&& proto_config,
+TapConfigBaseImpl::TapConfigBaseImpl(const envoy::config::tap::v3::TapConfig& proto_config,
                                      Common::Tap::Sink* admin_streamer)
     : max_buffered_rx_bytes_(PROTOBUF_GET_WRAPPED_OR_DEFAULT(
           proto_config.output_config(), max_buffered_rx_bytes, DefaultMaxBufferedBytes)),
@@ -72,7 +74,20 @@ TapConfigBaseImpl::TapConfigBaseImpl(envoy::config::tap::v3::TapConfig&& proto_c
     NOT_REACHED_GCOVR_EXCL_LINE;
   }
 
-  buildMatcher(proto_config.match_config(), matchers_);
+  envoy::config::common::matcher::v3::MatchPredicate match;
+  if (proto_config.has_match()) {
+    // Use the match field whenever it is set.
+    match = proto_config.match();
+  } else if (proto_config.has_match_config()) {
+    // Fallback to use the deprecated match_config field and upgrade (wire cast) it to the new
+    // MatchPredicate which is backward compatible with the old MatchPredicate originally
+    // introduced in the Tap filter.
+    MessageUtil::wireCast(proto_config.match_config(), match);
+  } else {
+    throw EnvoyException(fmt::format("Neither match nor match_config is set in TapConfig: {}",
+                                     proto_config.DebugString()));
+  }
+  buildMatcher(match, matchers_);
 }
 
 const Matcher& TapConfigBaseImpl::rootMatcher() const {
@@ -192,7 +207,7 @@ void FilePerTapSink::FilePerTapSinkHandle::submitTrace(
     break;
   case envoy::config::tap::v3::OutputSink::JSON_BODY_AS_BYTES:
   case envoy::config::tap::v3::OutputSink::JSON_BODY_AS_STRING:
-    output_file_ << MessageUtil::getJsonStringFromMessage(*trace, true, true);
+    output_file_ << MessageUtil::getJsonStringFromMessageOrError(*trace, true, true);
     break;
   default:
     NOT_REACHED_GCOVR_EXCL_LINE;

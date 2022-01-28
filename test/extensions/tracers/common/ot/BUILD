@@ -1,5 +1,3 @@
-licenses(["notice"])  # Apache 2
-
 load(
     "//bazel:envoy_build_system.bzl",
     "envoy_package",
@@ -9,6 +7,8 @@ load(
     "envoy_extension_cc_test",
 )
 
+licenses(["notice"])  # Apache 2
+
 envoy_package()
 
 envoy_extension_cc_test(
@@ -16,7 +16,7 @@ envoy_extension_cc_test(
     srcs = [
         "opentracing_driver_impl_test.cc",
     ],
-    extension_name = "envoy.tracers.dynamic_ot",
+    extension_names = ["envoy.tracers.dynamic_ot"],
     # TODO(wrowe): envoy_extension_ rules don't currently exclude windows extensions
     tags = ["skip_on_windows"],
     deps = [

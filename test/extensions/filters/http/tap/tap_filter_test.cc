@@ -1,9 +1,9 @@
-#include "extensions/filters/http/tap/config.h"
-#include "extensions/filters/http/tap/tap_filter.h"
+#include "source/extensions/filters/http/tap/config.h"
+#include "source/extensions/filters/http/tap/tap_filter.h"
 
 #include "test/extensions/filters/http/tap/common.h"
 #include "test/mocks/http/mocks.h"
-#include "test/mocks/server/mocks.h"
+#include "test/mocks/server/factory_context.h"
 #include "test/mocks/stream_info/mocks.h"
 #include "test/test_common/utility.h"
 
@@ -80,8 +80,7 @@ TEST_F(TapFilterTest, NoConfig) {
   EXPECT_EQ(Http::FilterTrailersStatus::Continue, filter_->decodeTrailers(request_trailers));
 
   Http::TestResponseHeaderMapImpl response_headers;
-  EXPECT_EQ(Http::FilterHeadersStatus::Continue,
-            filter_->encode100ContinueHeaders(response_headers));
+  EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter_->encode1xxHeaders(response_headers));
   EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter_->encodeHeaders(response_headers, false));
   Buffer::OwnedImpl response_body;
   EXPECT_EQ(Http::FilterDataStatus::Continue, filter_->encodeData(response_body, false));
@@ -101,7 +100,7 @@ TEST_F(TapFilterTest, Config) {
   Http::TestRequestHeaderMapImpl request_headers;
   EXPECT_CALL(*http_per_request_tapper_, onRequestHeaders(_));
   EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter_->decodeHeaders(request_headers, false));
-  Buffer::OwnedImpl request_body;
+  Buffer::OwnedImpl request_body("hello");
   EXPECT_CALL(*http_per_request_tapper_, onRequestBody(_));
   EXPECT_EQ(Http::FilterDataStatus::Continue, filter_->decodeData(request_body, false));
   Http::TestRequestTrailerMapImpl request_trailers;
@@ -109,11 +108,10 @@ TEST_F(TapFilterTest, Config) {
   EXPECT_EQ(Http::FilterTrailersStatus::Continue, filter_->decodeTrailers(request_trailers));
 
   Http::TestResponseHeaderMapImpl response_headers;
-  EXPECT_EQ(Http::FilterHeadersStatus::Continue,
-            filter_->encode100ContinueHeaders(response_headers));
+  EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter_->encode1xxHeaders(response_headers));
   EXPECT_CALL(*http_per_request_tapper_, onResponseHeaders(_));
   EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter_->encodeHeaders(response_headers, false));
-  Buffer::OwnedImpl response_body;
+  Buffer::OwnedImpl response_body("hello");
   EXPECT_CALL(*http_per_request_tapper_, onResponseBody(_));
   EXPECT_EQ(Http::FilterDataStatus::Continue, filter_->encodeData(response_body, false));
   Http::TestResponseTrailerMapImpl response_trailers;
@@ -133,7 +131,7 @@ TEST(TapFilterConfigTest, InvalidProto) {
       R"EOF(
   common_config:
     static_config:
-      match_config:
+      match:
         any_match: true
       output_config:
         sinks:
@@ -148,6 +146,29 @@ TEST(TapFilterConfigTest, InvalidProto) {
   EXPECT_THROW_WITH_MESSAGE(factory.createFilterFactoryFromProto(config, "stats", context),
                             EnvoyException,
                             "Error: Specifying admin streaming output without configuring admin.");
+}
+
+TEST(TapFilterConfigTest, NeitherMatchNorMatchConfig) {
+  const std::string filter_config =
+      R"EOF(
+  common_config:
+    static_config:
+      output_config:
+        sinks:
+          - format: PROTO_BINARY
+            file_per_tap:
+              path_prefix: abc
+)EOF";
+
+  envoy::extensions::filters::http::tap::v3::Tap config;
+  TestUtility::loadFromYaml(filter_config, config);
+  NiceMock<Server::Configuration::MockFactoryContext> context;
+  TapFilterFactory factory;
+
+  EXPECT_THROW_WITH_MESSAGE(factory.createFilterFactoryFromProto(config, "stats", context),
+                            EnvoyException,
+                            fmt::format("Neither match nor match_config is set in TapConfig: {}",
+                                        config.common_config().static_config().DebugString()));
 }
 
 } // namespace

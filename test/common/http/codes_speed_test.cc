@@ -8,9 +8,9 @@
 
 #include "envoy/stats/stats.h"
 
-#include "common/http/codes.h"
-#include "common/stats/fake_symbol_table_impl.h"
-#include "common/stats/isolated_store_impl.h"
+#include "source/common/http/codes.h"
+#include "source/common/stats/isolated_store_impl.h"
+#include "source/common/stats/symbol_table_impl.h"
 
 #include "benchmark/benchmark.h"
 
@@ -35,7 +35,7 @@ public:
         global_store_,      cluster_scope_,        prefix_, code,  internal_request,
         request_vhost_name, request_vcluster_name, from_az, to_az, canary};
 
-    code_stats_.chargeResponseStat(info);
+    code_stats_.chargeResponseStat(info, false);
   }
 
   void addResponses() {
@@ -76,24 +76,7 @@ public:
 } // namespace Http
 } // namespace Envoy
 
-static void BM_AddResponsesFakeSymtab(benchmark::State& state) {
-  Envoy::Http::CodeUtilitySpeedTest<Envoy::Stats::FakeSymbolTableImpl> context;
-
-  for (auto _ : state) {
-    context.addResponses();
-  }
-}
-BENCHMARK(BM_AddResponsesFakeSymtab);
-
-static void BM_ResponseTimingFakeSymtab(benchmark::State& state) {
-  Envoy::Http::CodeUtilitySpeedTest<Envoy::Stats::FakeSymbolTableImpl> context;
-
-  for (auto _ : state) {
-    context.responseTiming();
-  }
-}
-BENCHMARK(BM_ResponseTimingFakeSymtab);
-
+// NOLINTNEXTLINE(readability-identifier-naming)
 static void BM_AddResponsesRealSymtab(benchmark::State& state) {
   Envoy::Http::CodeUtilitySpeedTest<Envoy::Stats::SymbolTableImpl> context;
 
@@ -103,6 +86,7 @@ static void BM_AddResponsesRealSymtab(benchmark::State& state) {
 }
 BENCHMARK(BM_AddResponsesRealSymtab);
 
+// NOLINTNEXTLINE(readability-identifier-naming)
 static void BM_ResponseTimingRealSymtab(benchmark::State& state) {
   Envoy::Http::CodeUtilitySpeedTest<Envoy::Stats::SymbolTableImpl> context;
 

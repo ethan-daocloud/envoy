@@ -5,8 +5,8 @@
 #include "envoy/config/core/v3/base.pb.h"
 #include "envoy/network/listen_socket.h"
 
-#include "common/common/assert.h"
-#include "common/common/logger.h"
+#include "source/common/common/assert.h"
+#include "source/common/common/logger.h"
 
 namespace Envoy {
 namespace Network {
@@ -47,10 +47,22 @@ namespace Network {
 #define ENVOY_SOCKET_SO_MARK Network::SocketOptionName()
 #endif
 
+#ifdef SO_NOSIGPIPE
+#define ENVOY_SOCKET_SO_NOSIGPIPE ENVOY_MAKE_SOCKET_OPTION_NAME(SOL_SOCKET, SO_NOSIGPIPE)
+#else
+#define ENVOY_SOCKET_SO_NOSIGPIPE Network::SocketOptionName()
+#endif
+
 #ifdef SO_REUSEPORT
 #define ENVOY_SOCKET_SO_REUSEPORT ENVOY_MAKE_SOCKET_OPTION_NAME(SOL_SOCKET, SO_REUSEPORT)
 #else
 #define ENVOY_SOCKET_SO_REUSEPORT Network::SocketOptionName()
+#endif
+
+#ifdef UDP_GRO
+#define ENVOY_SOCKET_UDP_GRO ENVOY_MAKE_SOCKET_OPTION_NAME(SOL_UDP, UDP_GRO)
+#else
+#define ENVOY_SOCKET_UDP_GRO Network::SocketOptionName()
 #endif
 
 #ifdef TCP_KEEPCNT
@@ -122,15 +134,11 @@ public:
   // Socket::Option
   bool setOption(Socket& socket,
                  envoy::config::core::v3::SocketOption::SocketState state) const override;
-
-  // The common socket options don't require a hash key.
-  void hashKey(std::vector<uint8_t>&) const override {}
-
+  void hashKey(std::vector<uint8_t>& hash_key) const override;
   absl::optional<Details>
   getOptionDetails(const Socket& socket,
                    envoy::config::core::v3::SocketOption::SocketState state) const override;
-
-  bool isSupported() const;
+  bool isSupported() const override;
 
   /**
    * Set the option on the given socket.
@@ -152,8 +160,6 @@ private:
   // the buffer so its data() is not aligned in to alignof(void*).
   const std::vector<uint8_t> value_;
 };
-
-using SocketOptionImplOptRef = absl::optional<std::reference_wrapper<SocketOptionImpl>>;
 
 } // namespace Network
 } // namespace Envoy

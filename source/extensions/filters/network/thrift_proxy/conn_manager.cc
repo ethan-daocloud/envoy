@@ -1,18 +1,18 @@
-#include "extensions/filters/network/thrift_proxy/conn_manager.h"
+#include "source/extensions/filters/network/thrift_proxy/conn_manager.h"
 
 #include "envoy/common/exception.h"
 #include "envoy/event/dispatcher.h"
 
-#include "extensions/filters/network/thrift_proxy/app_exception_impl.h"
-#include "extensions/filters/network/thrift_proxy/protocol.h"
-#include "extensions/filters/network/thrift_proxy/transport.h"
+#include "source/extensions/filters/network/thrift_proxy/app_exception_impl.h"
+#include "source/extensions/filters/network/thrift_proxy/protocol.h"
+#include "source/extensions/filters/network/thrift_proxy/transport.h"
 
 namespace Envoy {
 namespace Extensions {
 namespace NetworkFilters {
 namespace ThriftProxy {
 
-ConnectionManager::ConnectionManager(Config& config, Runtime::RandomGenerator& random_generator,
+ConnectionManager::ConnectionManager(Config& config, Random::RandomGenerator& random_generator,
                                      TimeSource& time_source)
     : config_(config), stats_(config_.stats()), transport_(config.createTransport()),
       protocol_(config.createProtocol()),
@@ -55,6 +55,11 @@ void ConnectionManager::dispatch() {
     return;
   }
 
+  if (requests_overflow_) {
+    ENVOY_CONN_LOG(debug, "thrift filter requests overflow", read_callbacks_->connection());
+    return;
+  }
+
   try {
     bool underflow = false;
     while (!underflow) {
@@ -67,7 +72,7 @@ void ConnectionManager::dispatch() {
 
     return;
   } catch (const AppException& ex) {
-    ENVOY_LOG(error, "thrift application exception: {}", ex.what());
+    ENVOY_LOG(debug, "thrift application exception: {}", ex.what());
     if (rpcs_.empty()) {
       MessageMetadata metadata;
       sendLocalReply(metadata, ex, true);
@@ -75,7 +80,7 @@ void ConnectionManager::dispatch() {
       sendLocalReply(*(*rpcs_.begin())->metadata_, ex, true);
     }
   } catch (const EnvoyException& ex) {
-    ENVOY_CONN_LOG(error, "thrift error: {}", read_callbacks_->connection(), ex.what());
+    ENVOY_CONN_LOG(debug, "thrift error: {}", read_callbacks_->connection(), ex.what());
 
     if (rpcs_.empty()) {
       // Transport/protocol mismatch (including errors in automatic detection). Just hang up
@@ -139,6 +144,9 @@ void ConnectionManager::continueDecoding() {
 
 void ConnectionManager::doDeferredRpcDestroy(ConnectionManager::ActiveRpc& rpc) {
   read_callbacks_->connection().dispatcher().deferredDelete(rpc.removeFromList(rpcs_));
+  if (requests_overflow_ && rpcs_.empty()) {
+    read_callbacks_->connection().close(Network::ConnectionCloseType::FlushWrite);
+  }
 }
 
 void ConnectionManager::resetAllRpcs(bool local_reset) {
@@ -171,9 +179,26 @@ DecoderEventHandler& ConnectionManager::newDecoderEventHandler() {
 
   ActiveRpcPtr new_rpc(new ActiveRpc(*this));
   new_rpc->createFilterChain();
-  new_rpc->moveIntoList(std::move(new_rpc), rpcs_);
+  LinkedList::moveIntoList(std::move(new_rpc), rpcs_);
 
   return **rpcs_.begin();
+}
+
+bool ConnectionManager::passthroughEnabled() const {
+  if (!config_.payloadPassthrough()) {
+    return false;
+  }
+
+  // If the rpcs list is empty, a local response happened.
+  //
+  // TODO(rgs1): we actually could still enable passthrough for local
+  // responses as long as the transport is framed and the protocol is
+  // not Twitter.
+  if (rpcs_.empty()) {
+    return false;
+  }
+
+  return (*rpcs_.begin())->passthroughSupported();
 }
 
 bool ConnectionManager::ResponseDecoder::onData(Buffer::Instance& data) {
@@ -185,27 +210,19 @@ bool ConnectionManager::ResponseDecoder::onData(Buffer::Instance& data) {
   return complete_;
 }
 
+FilterStatus ConnectionManager::ResponseDecoder::passthroughData(Buffer::Instance& data) {
+  passthrough_ = true;
+  return ProtocolConverter::passthroughData(data);
+}
+
 FilterStatus ConnectionManager::ResponseDecoder::messageBegin(MessageMetadataSharedPtr metadata) {
   metadata_ = metadata;
   metadata_->setSequenceId(parent_.original_sequence_id_);
 
-  first_reply_field_ =
-      (metadata->hasMessageType() && metadata->messageType() == MessageType::Reply);
-  return ProtocolConverter::messageBegin(metadata);
-}
-
-FilterStatus ConnectionManager::ResponseDecoder::fieldBegin(absl::string_view name,
-                                                            FieldType& field_type,
-                                                            int16_t& field_id) {
-  if (first_reply_field_) {
-    // Reply messages contain a struct where field 0 is the call result and fields 1+ are
-    // exceptions, if defined. At most one field may be set. Therefore, the very first field we
-    // encounter in a reply is either field 0 (success) or not (IDL exception returned).
-    success_ = field_id == 0 && field_type != FieldType::Stop;
-    first_reply_field_ = false;
+  if (metadata->hasReplyType()) {
+    success_ = metadata->replyType() == ReplyType::Success;
   }
-
-  return ProtocolConverter::fieldBegin(name, field_type, field_id);
+  return ProtocolConverter::messageBegin(metadata);
 }
 
 FilterStatus ConnectionManager::ResponseDecoder::transportEnd() {
@@ -233,14 +250,19 @@ FilterStatus ConnectionManager::ResponseDecoder::transportEnd() {
   cm.read_callbacks_->connection().write(buffer, false);
 
   cm.stats_.response_.inc();
+  if (passthrough_) {
+    cm.stats_.response_passthrough_.inc();
+  }
 
   switch (metadata_->messageType()) {
   case MessageType::Reply:
     cm.stats_.response_reply_.inc();
-    if (success_.value_or(false)) {
-      cm.stats_.response_success_.inc();
-    } else {
-      cm.stats_.response_error_.inc();
+    if (success_) {
+      if (success_.value()) {
+        cm.stats_.response_success_.inc();
+      } else {
+        cm.stats_.response_error_.inc();
+      }
     }
 
     break;
@@ -255,6 +277,10 @@ FilterStatus ConnectionManager::ResponseDecoder::transportEnd() {
   }
 
   return FilterStatus::Continue;
+}
+
+bool ConnectionManager::ResponseDecoder::passthroughEnabled() const {
+  return parent_.parent_.passthroughEnabled();
 }
 
 void ConnectionManager::ActiveRpcDecoderFilter::continueDecoding() {
@@ -273,32 +299,45 @@ void ConnectionManager::ActiveRpcDecoderFilter::continueDecoding() {
 FilterStatus ConnectionManager::ActiveRpc::applyDecoderFilters(ActiveRpcDecoderFilter* filter) {
   ASSERT(filter_action_ != nullptr);
 
-  if (!local_response_sent_) {
-    if (upgrade_handler_) {
-      // Divert events to the current protocol upgrade handler.
-      const FilterStatus status = filter_action_(upgrade_handler_.get());
-      filter_context_.reset();
+  if (local_response_sent_) {
+    filter_action_ = nullptr;
+    filter_context_.reset();
+    return FilterStatus::Continue;
+  }
+
+  if (upgrade_handler_) {
+    // Divert events to the current protocol upgrade handler.
+    const FilterStatus status = filter_action_(upgrade_handler_.get());
+    filter_context_.reset();
+    return status;
+  }
+
+  std::list<ActiveRpcDecoderFilterPtr>::iterator entry =
+      !filter ? decoder_filters_.begin() : std::next(filter->entry());
+  for (; entry != decoder_filters_.end(); entry++) {
+    const FilterStatus status = filter_action_((*entry)->handle_.get());
+    if (local_response_sent_) {
+      // The filter called sendLocalReply but _did not_ close the connection.
+      // We return FilterStatus::Continue irrespective of the current result,
+      // which is fine because subsequent calls to this method will skip
+      // filters anyway.
+      //
+      // Note: we need to return FilterStatus::Continue here, in order for decoding
+      // to proceed. This is important because as noted above, the connection remains
+      // open so we need to consume the remaining bytes.
+      break;
+    }
+
+    if (status != FilterStatus::Continue) {
+      // If we got FilterStatus::StopIteration and a local reply happened but
+      // local_response_sent_ was not set, the connection was closed.
+      //
+      // In this case, either resetAllRpcs() gets called via onEvent(LocalClose) or
+      // dispatch() stops the processing.
+      //
+      // In other words, after a local reply closes the connection and StopIteration
+      // is returned we are done.
       return status;
-    }
-
-    std::list<ActiveRpcDecoderFilterPtr>::iterator entry;
-    if (!filter) {
-      entry = decoder_filters_.begin();
-    } else {
-      entry = std::next(filter->entry());
-    }
-
-    for (; entry != decoder_filters_.end(); entry++) {
-      const FilterStatus status = filter_action_((*entry)->handle_.get());
-      if (local_response_sent_) {
-        // The filter called sendLocalReply: stop processing filters and return
-        // FilterStatus::Continue irrespective of the current result.
-        break;
-      }
-
-      if (status != FilterStatus::Continue) {
-        return status;
-      }
     }
   }
 
@@ -352,6 +391,18 @@ void ConnectionManager::ActiveRpc::finalizeRequest() {
 
   parent_.stats_.request_.inc();
 
+  parent_.accumulated_requests_++;
+  if (parent_.config_.maxRequestsPerConnection() > 0 &&
+      parent_.accumulated_requests_ >= parent_.config_.maxRequestsPerConnection()) {
+    parent_.read_callbacks_->connection().readDisable(true);
+    parent_.requests_overflow_ = true;
+    parent_.stats_.downstream_cx_max_requests_.inc();
+  }
+
+  if (passthrough_) {
+    parent_.stats_.request_passthrough_.inc();
+  }
+
   bool destroy_rpc = false;
   switch (original_msg_type_) {
   case MessageType::Call:
@@ -379,6 +430,26 @@ void ConnectionManager::ActiveRpc::finalizeRequest() {
   if (destroy_rpc) {
     parent_.doDeferredRpcDestroy(*this);
   }
+}
+
+bool ConnectionManager::ActiveRpc::passthroughSupported() const {
+  for (auto& entry : decoder_filters_) {
+    if (!entry->handle_->passthroughSupported()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+FilterStatus ConnectionManager::ActiveRpc::passthroughData(Buffer::Instance& data) {
+  passthrough_ = true;
+  filter_context_ = &data;
+  filter_action_ = [this](DecoderEventHandler* filter) -> FilterStatus {
+    Buffer::Instance* data = absl::any_cast<Buffer::Instance*>(filter_context_);
+    return filter->passthroughData(*data);
+  };
+
+  return applyDecoderFilters(nullptr);
 }
 
 FilterStatus ConnectionManager::ActiveRpc::messageBegin(MessageMetadataSharedPtr metadata) {

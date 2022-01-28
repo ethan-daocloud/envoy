@@ -2,19 +2,20 @@
 
 #include <algorithm>
 #include <cstring>
+#include <functional>
 #include <string>
 
 #include "envoy/stats/stats.h"
 #include "envoy/stats/store.h"
 
-#include "common/common/utility.h"
-#include "common/stats/allocator_impl.h"
-#include "common/stats/null_counter.h"
-#include "common/stats/null_gauge.h"
-#include "common/stats/store_impl.h"
-#include "common/stats/symbol_table_impl.h"
-#include "common/stats/tag_utility.h"
-#include "common/stats/utility.h"
+#include "source/common/common/utility.h"
+#include "source/common/stats/allocator_impl.h"
+#include "source/common/stats/null_counter.h"
+#include "source/common/stats/null_gauge.h"
+#include "source/common/stats/store_impl.h"
+#include "source/common/stats/symbol_table_impl.h"
+#include "source/common/stats/tag_utility.h"
+#include "source/common/stats/utility.h"
 
 #include "absl/container/flat_hash_map.h"
 
@@ -91,6 +92,24 @@ public:
     return vec;
   }
 
+  bool iterate(const IterateFn<Base>& fn) const {
+    for (auto& stat : stats_) {
+      if (!fn(stat.second)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void forEachStat(SizeFn f_size, StatFn<Base> f_stat) const {
+    if (f_size != nullptr) {
+      f_size(stats_.size());
+    }
+    for (auto const& stat : stats_) {
+      f_stat(*stat.second);
+    }
+  }
+
 private:
   friend class IsolatedStoreImpl;
 
@@ -122,6 +141,7 @@ public:
     return counter;
   }
   ScopePtr createScope(const std::string& name) override;
+  ScopePtr scopeFromStatName(StatName name) override;
   void deliverHistogramToSinks(const Histogram&, uint64_t) override {}
   Gauge& gaugeFromStatNameWithTags(const StatName& name, StatNameTagVectorOptConstRef tags,
                                    Gauge::ImportMode import_mode) override {
@@ -152,6 +172,13 @@ public:
   }
   TextReadoutOptConstRef findTextReadout(StatName name) const override {
     return text_readouts_.find(name);
+  }
+
+  bool iterate(const IterateFn<Counter>& fn) const override { return counters_.iterate(fn); }
+  bool iterate(const IterateFn<Gauge>& fn) const override { return gauges_.iterate(fn); }
+  bool iterate(const IterateFn<Histogram>& fn) const override { return histograms_.iterate(fn); }
+  bool iterate(const IterateFn<TextReadout>& fn) const override {
+    return text_readouts_.iterate(fn);
   }
 
   // Stats::Store
@@ -186,6 +213,40 @@ public:
   TextReadout& textReadoutFromString(const std::string& name) override {
     StatNameManagedStorage storage(name, symbolTable());
     return textReadoutFromStatName(storage.statName());
+  }
+
+  void forEachCounter(SizeFn f_size, StatFn<Counter> f_stat) const override {
+    counters_.forEachStat(f_size, f_stat);
+  }
+
+  void forEachGauge(SizeFn f_size, StatFn<Gauge> f_stat) const override {
+    gauges_.forEachStat(f_size, f_stat);
+  }
+
+  void forEachTextReadout(SizeFn f_size, StatFn<TextReadout> f_stat) const override {
+    text_readouts_.forEachStat(f_size, f_stat);
+  }
+
+  void forEachScope(SizeFn f_size, StatFn<const Scope> f_stat) const override {
+    if (f_size != nullptr) {
+      f_size(1);
+    }
+    const Scope& scope = *this;
+    f_stat(scope);
+  }
+
+  Stats::StatName prefix() const override { return StatName(); }
+
+  void forEachSinkedCounter(SizeFn f_size, StatFn<Counter> f_stat) const override {
+    forEachCounter(f_size, f_stat);
+  }
+
+  void forEachSinkedGauge(SizeFn f_size, StatFn<Gauge> f_stat) const override {
+    forEachGauge(f_size, f_stat);
+  }
+
+  void forEachSinkedTextReadout(SizeFn f_size, StatFn<TextReadout> f_stat) const override {
+    forEachTextReadout(f_size, f_stat);
   }
 
 private:

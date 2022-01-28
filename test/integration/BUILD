@@ -1,15 +1,18 @@
-licenses(["notice"])  # Apache 2
-
+load("@rules_python//python:defs.bzl", "py_binary")
 load(
     "//bazel:envoy_build_system.bzl",
     "envoy_cc_fuzz_test",
     "envoy_cc_test",
+    "envoy_cc_test_binary",
     "envoy_cc_test_library",
     "envoy_package",
     "envoy_proto_library",
+    "envoy_select_enable_http3",
     "envoy_select_hot_restart",
     "envoy_sh_test",
 )
+
+licenses(["notice"])  # Apache 2
 
 envoy_package()
 
@@ -27,12 +30,12 @@ envoy_cc_test_library(
     ],
     deps = [
         ":http_integration_lib",
-        "//source/common/common:version_lib",
+        "//source/common/common:matchers_lib",
         "//source/common/config:protobuf_link_hacks",
-        "//source/common/config:version_converter_lib",
         "//source/common/protobuf:utility_lib",
-        "//source/extensions/filters/network/redis_proxy:config",
+        "//source/common/version:version_lib",
         "//test/common/grpc:grpc_client_integration_lib",
+        "//test/config:v2_link_hacks",
         "//test/test_common:network_utility_lib",
         "//test/test_common:resources_lib",
         "//test/test_common:utility_lib",
@@ -48,8 +51,8 @@ envoy_cc_test_library(
 
 envoy_cc_test(
     name = "ads_integration_test",
+    size = "enormous",
     srcs = ["ads_integration_test.cc"],
-    tags = ["fails_on_windows"],
     deps = [
         ":ads_integration_lib",
         ":http_integration_lib",
@@ -61,6 +64,7 @@ envoy_cc_test(
         "//test/test_common:utility_lib",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/cluster/v3:pkg_cc_proto",
+        "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/endpoint/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/listener/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/route/v3:pkg_cc_proto",
@@ -68,25 +72,18 @@ envoy_cc_test(
 )
 
 envoy_cc_test(
+    name = "alpn_integration_test",
+    srcs = ["alpn_integration_test.cc"],
+    deps = [":http_integration_lib"],
+)
+
+envoy_cc_test(
     name = "api_listener_integration_test",
     srcs = ["api_listener_integration_test.cc"],
-    tags = ["fails_on_windows"],
     deps = [
         ":http_integration_lib",
         "//test/mocks/http:stream_encoder_mock",
         "//test/server:utility_lib",
-    ],
-)
-
-envoy_cc_test(
-    name = "api_version_integration_test",
-    srcs = ["api_version_integration_test.cc"],
-    tags = ["fails_on_windows"],
-    deps = [
-        ":http_integration_lib",
-        "@envoy_api//envoy/api/v2:pkg_cc_proto",
-        "@envoy_api//envoy/api/v2/core:pkg_cc_proto",
-        "@envoy_api//envoy/service/discovery/v3:pkg_cc_proto",
     ],
 )
 
@@ -106,20 +103,24 @@ envoy_proto_library(
     srcs = [":capture_fuzz.proto"],
 )
 
+envoy_proto_library(
+    name = "h2_capture_fuzz_proto",
+    srcs = [":h2_capture_fuzz.proto"],
+)
+
 envoy_cc_test(
     name = "cds_integration_test",
     srcs = ["cds_integration_test.cc"],
     data = [
         "//test/config/integration/certs",
     ],
-    tags = ["fails_on_windows"],
     deps = [
         ":http_integration_lib",
         "//source/common/config:protobuf_link_hacks",
         "//source/common/protobuf:utility_lib",
         "//test/common/grpc:grpc_client_integration_lib",
+        "//test/config:v2_link_hacks",
         "//test/mocks/runtime:runtime_mocks",
-        "//test/mocks/server:server_mocks",
         "//test/test_common:network_utility_lib",
         "//test/test_common:resources_lib",
         "//test/test_common:utility_lib",
@@ -131,8 +132,6 @@ envoy_cc_test(
 envoy_cc_test(
     name = "eds_integration_test",
     srcs = ["eds_integration_test.cc"],
-    # Times out on Windows
-    tags = ["fails_on_windows"],
     deps = [
         ":http_integration_lib",
         "//source/common/upstream:load_balancer_lib",
@@ -148,6 +147,21 @@ envoy_cc_test(
     ],
 )
 
+envoy_cc_test(
+    name = "leds_integration_test",
+    srcs = ["leds_integration_test.cc"],
+    deps = [
+        ":http_integration_lib",
+        "//test/config:utility_lib",
+        "//test/test_common:network_utility_lib",
+        "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
+        "@envoy_api//envoy/config/cluster/v3:pkg_cc_proto",
+        "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
+        "@envoy_api//envoy/config/endpoint/v3:pkg_cc_proto",
+        "@envoy_api//envoy/type/v3:pkg_cc_proto",
+    ],
+)
+
 envoy_proto_library(
     name = "filter_manager_integration_proto",
     srcs = [":filter_manager_integration_test.proto"],
@@ -158,12 +172,10 @@ envoy_cc_test(
     srcs = [
         "filter_manager_integration_test.cc",
     ],
-    tags = ["fails_on_windows"],
     deps = [
         ":filter_manager_integration_proto_cc_proto",
         ":http_integration_lib",
         ":integration_lib",
-        "//source/extensions/filters/listener/original_dst:config",
         "//source/extensions/filters/listener/tls_inspector:config",
         "//source/extensions/filters/network/common:factory_base_lib",
         "//source/extensions/filters/network/echo:config",
@@ -172,16 +184,17 @@ envoy_cc_test(
         "//test/test_common:registry_lib",
         "//test/test_common:utility_lib",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/access_loggers/file/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/filters/network/tcp_proxy/v3:pkg_cc_proto",
     ],
 )
 
 envoy_cc_test(
     name = "cluster_filter_integration_test",
     srcs = ["cluster_filter_integration_test.cc"],
-    tags = ["fails_on_windows"],
     deps = [
         ":integration_lib",
-        "//include/envoy/network:filter_interface",
+        "//envoy/network:filter_interface",
         "//source/extensions/filters/network/tcp_proxy:config",
         "//test/config:utility_lib",
         "//test/test_common:registry_lib",
@@ -192,7 +205,6 @@ envoy_cc_test(
 envoy_cc_test(
     name = "custom_cluster_integration_test",
     srcs = ["custom_cluster_integration_test.cc"],
-    tags = ["fails_on_windows"],
     deps = [
         ":http_integration_lib",
         "//source/common/upstream:load_balancer_lib",
@@ -210,14 +222,13 @@ envoy_cc_test(
     data = [
         "//test/config/integration/certs",
     ],
-    tags = ["fails_on_windows"],
     deps = [
         ":http_integration_lib",
         "//source/common/config:protobuf_link_hacks",
         "//source/common/protobuf:utility_lib",
         "//test/common/grpc:grpc_client_integration_lib",
+        "//test/config:v2_link_hacks",
         "//test/mocks/runtime:runtime_mocks",
-        "//test/mocks/server:server_mocks",
         "//test/test_common:network_utility_lib",
         "//test/test_common:resources_lib",
         "//test/test_common:utility_lib",
@@ -225,16 +236,41 @@ envoy_cc_test(
     ],
 )
 
+envoy_cc_test(
+    name = "drain_close_integration_test",
+    srcs = [
+        "drain_close_integration_test.cc",
+    ],
+    deps = [
+        ":http_protocol_integration_lib",
+        "//test/test_common:utility_lib",
+    ],
+)
+
 exports_files(["test_utility.sh"])
+
+envoy_cc_test_binary(
+    name = "hotrestart_main",
+    srcs = ["hotrestart_main.cc"],
+    external_deps = [
+        "abseil_symbolize",
+    ],
+    stamped = True,
+    deps = [
+        "//source/exe:envoy_main_common_with_core_extensions_lib",
+        "//source/exe:platform_impl_lib",
+    ],
+)
 
 envoy_sh_test(
     name = "hotrestart_test",
+    size = "enormous",
     srcs = envoy_select_hot_restart([
         "hotrestart_test.sh",
     ]),
+    cc_binary = [":hotrestart_main"],
     data = [
         "test_utility.sh",
-        "//source/exe:envoy-static",
         "//test/config/integration:server_config_files",
         "//tools:socket_passing",
     ],
@@ -245,13 +281,28 @@ envoy_sh_test(
 envoy_sh_test(
     name = "run_envoy_test",
     srcs = ["run_envoy_test.sh"],
+    cc_binary = [":hotrestart_main"],
     data = [
         "test_utility.sh",
-        "//source/exe:envoy-static",
         "//test/config/integration:server_config_files",
     ],
-    # TODO: This script invocation does not work on Windows, see: https://github.com/bazelbuild/bazel/issues/10959
-    tags = ["fails_on_windows"],
+)
+
+envoy_cc_test(
+    name = "alpn_selection_integration_test",
+    srcs = [
+        "alpn_selection_integration_test.cc",
+    ],
+    data = [
+        "//test/config/integration/certs",
+    ],
+    deps = [
+        ":http_integration_lib",
+        "//test/test_common:utility_lib",
+        "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
+        "@envoy_api//envoy/config/route/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/transport_sockets/tls/v3:pkg_cc_proto",
+    ],
 )
 
 envoy_cc_test(
@@ -259,11 +310,12 @@ envoy_cc_test(
     srcs = [
         "header_integration_test.cc",
     ],
-    tags = ["fails_on_windows"],
     deps = [
         ":http_integration_lib",
         "//source/common/config:api_version_lib",
         "//source/common/protobuf",
+        "//source/extensions/http/original_ip_detection/xff:config",
+        "//test/config:v2_link_hacks",
         "//test/test_common:utility_lib",
         "@envoy_api//envoy/api/v2:pkg_cc_proto",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
@@ -271,33 +323,105 @@ envoy_cc_test(
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/filters/http/router/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg_cc_proto",
+        "@envoy_api//envoy/service/discovery/v3:pkg_cc_proto",
     ],
 )
 
 envoy_cc_test(
-    name = "http2_integration_test",
-    srcs = [
-        "http2_integration_test.cc",
-        "http2_integration_test.h",
-    ],
-    tags = ["fails_on_windows"],
+    name = "http_conn_pool_integration_test",
+    srcs = ["http_conn_pool_integration_test.cc"],
     deps = [
+        ":http_protocol_integration_lib",
+        "//test/test_common:test_time_lib",
+        "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_test(
+    name = "http2_flood_integration_test",
+    srcs = [
+        "http2_flood_integration_test.cc",
+    ],
+    shard_count = 4,
+    deps = [
+        ":autonomous_upstream_lib",
         ":http_integration_lib",
+        ":socket_interface_swap_lib",
+        ":tracked_watermark_buffer_lib",
+        "//test/common/http/http2:http2_frame",
+        "//test/integration/filters:backpressure_filter_config_lib",
+        "//test/integration/filters:set_response_code_filter_config_proto_cc_proto",
+        "//test/integration/filters:set_response_code_filter_lib",
+        "//test/mocks/http:http_mocks",
+        "//test/test_common:test_runtime_lib",
+        "//test/test_common:utility_lib",
+        "@com_google_absl//absl/synchronization",
+        "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
+        "@envoy_api//envoy/config/cluster/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_test(
+    name = "multiplexed_integration_test",
+    srcs = [
+        "multiplexed_integration_test.cc",
+    ],
+    shard_count = 8,
+    deps = [
+        ":http_protocol_integration_lib",
         "//source/common/buffer:buffer_lib",
         "//source/common/http:header_map_lib",
         "//source/extensions/filters/http/buffer:config",
-        "//source/extensions/filters/http/health_check:config",
-        "//test/common/http/http2:http2_frame",
         "//test/integration/filters:metadata_stop_all_filter_config_lib",
+        "//test/integration/filters:on_local_reply_filter_config_lib",
         "//test/integration/filters:request_metadata_filter_config_lib",
         "//test/integration/filters:response_metadata_filter_config_lib",
+        "//test/integration/filters:set_response_code_filter_config_proto_cc_proto",
+        "//test/integration/filters:set_response_code_filter_lib",
         "//test/integration/filters:stop_iteration_and_continue",
         "//test/mocks/http:http_mocks",
-        "//test/mocks/upstream:upstream_mocks",
+        "//test/mocks/upstream:retry_priority_factory_mocks",
+        "//test/mocks/upstream:retry_priority_mocks",
+        "//test/test_common:utility_lib",
+        "@com_google_absl//absl/synchronization",
+        "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
+        "@envoy_api//envoy/config/cluster/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_test(
+    name = "buffer_accounting_integration_test",
+    srcs = [
+        "buffer_accounting_integration_test.cc",
+    ],
+    shard_count = 2,
+    deps = [
+        ":base_overload_integration_test_lib",
+        ":http_integration_lib",
+        ":http_protocol_integration_lib",
+        ":socket_interface_swap_lib",
+        ":tracked_watermark_buffer_lib",
+        "//test/mocks/http:http_mocks",
         "//test/test_common:utility_lib",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/cluster/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_test_library(
+    name = "socket_interface_swap_lib",
+    srcs = [
+        "socket_interface_swap.cc",
+    ],
+    hdrs = [
+        "socket_interface_swap.h",
+    ],
+    deps = [
+        "//test/integration/filters:test_socket_interface_lib",
+        "@com_google_absl//absl/synchronization",
     ],
 )
 
@@ -306,7 +430,6 @@ envoy_cc_test(
     srcs = [
         "http_subset_lb_integration_test.cc",
     ],
-    tags = ["fails_on_windows"],
     deps = [
         ":http_integration_lib",
         "//test/common/upstream:utility_lib",
@@ -325,15 +448,12 @@ envoy_cc_test(
     data = [
         "//test/config/integration/certs",
     ],
-    tags = ["fails_on_windows"],
     deps = [
         ":http_integration_lib",
-        "//source/extensions/transport_sockets/tls:context_lib",
         "//test/common/upstream:utility_lib",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/route/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg_cc_proto",
-        "@envoy_api//envoy/extensions/transport_sockets/tls/v3:pkg_cc_proto",
     ],
 )
 
@@ -342,11 +462,21 @@ envoy_cc_test(
     srcs = [
         "header_casing_integration_test.cc",
     ],
-    tags = ["fails_on_windows"],
     deps = [
         ":http_integration_lib",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_test(
+    name = "http_typed_per_filter_config_test",
+    srcs = [
+        "http_typed_per_filter_config_test.cc",
+    ],
+    deps = [
+        ":http_integration_lib",
+        "//test/integration/filters:set_response_code_filter_lib",
     ],
 )
 
@@ -356,7 +486,6 @@ envoy_cc_test(
         "http_timeout_integration_test.cc",
         "http_timeout_integration_test.h",
     ],
-    tags = ["fails_on_windows"],
     deps = [
         ":http_integration_lib",
         "@envoy_api//envoy/extensions/filters/http/router/v3:pkg_cc_proto",
@@ -364,22 +493,29 @@ envoy_cc_test(
     ],
 )
 
-envoy_cc_test(
-    name = "protocol_integration_test",
+envoy_cc_test_library(
+    name = "protocol_integration_test_lib",
     srcs = [
         "protocol_integration_test.cc",
+        "protocol_integration_test.h",
     ],
-    # As this test has many H1/H2/v4/v6 tests it takes a while to run.
-    # Shard it enough to bring the run time in line with other integration tests.
-    shard_count = 5,
-    tags = ["fails_on_windows"],
     deps = [
         ":http_protocol_integration_lib",
+        ":socket_interface_swap_lib",
         "//source/common/http:header_map_lib",
         "//source/extensions/filters/http/buffer:config",
-        "//source/extensions/filters/http/health_check:config",
+        "//test/common/http/http2:http2_frame",
+        "//test/integration/filters:continue_after_local_reply_filter_lib",
+        "//test/integration/filters:continue_headers_only_inject_body",
         "//test/integration/filters:encoder_decoder_buffer_filter_lib",
+        "//test/integration/filters:invalid_header_filter_lib",
+        "//test/integration/filters:local_reply_during_encoding_data_filter_lib",
+        "//test/integration/filters:local_reply_during_encoding_filter_lib",
+        "//test/integration/filters:local_reply_with_metadata_filter_lib",
         "//test/integration/filters:random_pause_filter_lib",
+        "//test/integration/filters:remove_response_headers_lib",
+        "//test/test_common:logging_lib",
+        "//test/test_common:threadsafe_singleton_injector_lib",
         "//test/test_common:utility_lib",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/route/v3:pkg_cc_proto",
@@ -388,18 +524,32 @@ envoy_cc_test(
 )
 
 envoy_cc_test(
-    name = "http2_upstream_integration_test",
+    name = "protocol_integration_test",
     srcs = [
-        "http2_upstream_integration_test.cc",
-        "http2_upstream_integration_test.h",
+        "instantiate_protocol_integration_test.cc",
     ],
-    tags = ["fails_on_windows"],
+    args = [
+        # for coverage, until this defaults true.
+        "--runtime-feature-override-for-tests=envoy.reloadable_features.allow_upstream_inline_write",
+    ],
+    # As this test has many H1/H2/v4/v6 tests it takes a while to run.
+    # Shard it enough to bring the run time in line with other integration tests.
+    shard_count = 10,
     deps = [
-        ":http_integration_lib",
+        ":protocol_integration_test_lib",
+    ],
+)
+
+envoy_cc_test(
+    name = "multiplexed_upstream_integration_test",
+    srcs = [
+        "multiplexed_upstream_integration_test.cc",
+    ],
+    shard_count = 2,
+    deps = [
+        ":http_protocol_integration_lib",
         "//source/common/http:header_map_lib",
-        "//source/extensions/access_loggers/grpc:http_config",
         "//source/extensions/filters/http/buffer:config",
-        "//source/extensions/filters/http/health_check:config",
         "//test/integration/filters:encoder_decoder_buffer_filter_lib",
         "//test/integration/filters:random_pause_filter_lib",
         "//test/test_common:utility_lib",
@@ -414,13 +564,12 @@ envoy_cc_test(
         "integration_admin_test.cc",
         "integration_admin_test.h",
     ],
-    tags = ["fails_on_windows"],
     deps = [
         ":http_protocol_integration_lib",
-        "//include/envoy/http:header_map_interface",
+        "//envoy/http:header_map_interface",
+        "//source/common/stats:histogram_lib",
         "//source/common/stats:stats_matcher_lib",
         "//source/extensions/filters/http/buffer:config",
-        "//source/extensions/filters/http/health_check:config",
         "//test/common/stats:stat_test_utility_lib",
         "@envoy_api//envoy/admin/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
@@ -437,7 +586,7 @@ envoy_cc_test_library(
         "test_host_predicate_config.h",
     ],
     deps = [
-        "//include/envoy/upstream:retry_interface",
+        "//envoy/upstream:retry_interface",
     ],
 )
 
@@ -449,26 +598,36 @@ envoy_cc_test_library(
     hdrs = [
         "http_integration.h",
     ],
+    data = [
+        "//test/config/integration/certs",
+    ],
     deps = [
         ":integration_lib",
         ":test_host_predicate_lib",
-        "//include/envoy/event:timer_interface",
+        "//envoy/event:timer_interface",
         "//source/common/common:thread_annotations",
+        "//source/common/network:socket_option_lib",
         "//source/extensions/filters/http/on_demand:config",
         "//source/extensions/filters/http/router:config",
         "//source/extensions/filters/network/http_connection_manager:config",
+        "//source/extensions/transport_sockets/tls:context_lib",
+        "//test/common/http/http2:http2_frame",
         "//test/common/upstream:utility_lib",
+        "//test/integration/filters:add_body_filter_config_lib",
         "//test/integration/filters:add_trailers_filter_config_lib",
         "//test/integration/filters:call_decodedata_once_filter_config_lib",
+        "//test/integration/filters:crash_filter_config_lib",
         "//test/integration/filters:decode_headers_return_stop_all_filter_config_lib",
         "//test/integration/filters:encode_headers_return_stop_all_filter_config_lib",
-        "//test/integration/filters:headers_only_filter_config_lib",
         "//test/integration/filters:modify_buffer_filter_config_lib",
         "//test/integration/filters:passthrough_filter_config_lib",
         "//test/integration/filters:pause_filter_lib",
+        "//test/integration/filters:wait_for_whole_request_and_response_config_lib",
+        "//test/mocks/upstream:cluster_info_mocks",
         "//test/test_common:registry_lib",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/transport_sockets/quic/v3:pkg_cc_proto",
     ],
 )
 
@@ -483,6 +642,7 @@ envoy_cc_test_library(
     deps = [
         ":http_integration_lib",
         "//test/common/upstream:utility_lib",
+        "//test/integration/filters:stream_info_to_headers_filter_lib",
     ],
 )
 
@@ -492,9 +652,10 @@ envoy_cc_test(
     # As this test has many pauses for idle timeouts, it takes a while to run.
     # Shard it enough to bring the run time in line with other integration tests.
     shard_count = 2,
-    tags = ["fails_on_windows"],
     deps = [
         ":http_protocol_integration_lib",
+        "//test/integration/filters:backpressure_filter_config_lib",
+        "//test/integration/filters:reset_idle_timer_filter_lib",
         "//test/test_common:test_time_lib",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg_cc_proto",
@@ -502,19 +663,156 @@ envoy_cc_test(
 )
 
 envoy_cc_test_library(
-    name = "integration_lib",
+    name = "integration_stream_decoder_lib",
+    srcs = [
+        "integration_stream_decoder.cc",
+    ],
+    hdrs = [
+        "integration_stream_decoder.h",
+    ],
+    deps = [
+        "//envoy/event:dispatcher_interface",
+        "//envoy/http:codec_interface",
+        "//envoy/http:header_map_interface",
+        "//envoy/http:metadata_interface",
+        "//source/common/common:dump_state_utils",
+        "//test/test_common:utility_lib",
+    ],
+)
+
+envoy_cc_test_library(
+    name = "integration_tcp_client_lib",
+    srcs = [
+        "integration_tcp_client.cc",
+    ],
+    hdrs = [
+        "integration_tcp_client.h",
+    ],
+    deps = [
+        ":utility_lib",
+        "//envoy/event:dispatcher_interface",
+        "//envoy/network:address_interface",
+        "//envoy/network:connection_interface",
+        "//envoy/network:listen_socket_interface",
+        "//envoy/network:socket_interface",
+        "//test/mocks/buffer:buffer_mocks",
+        "//test/test_common:network_utility_lib",
+        "//test/test_common:utility_lib",
+    ],
+)
+
+envoy_cc_test_library(
+    name = "fake_upstream_lib",
+    srcs = [
+        "fake_upstream.cc",
+    ],
+    hdrs = [
+        "fake_upstream.h",
+    ],
+    deps = [
+        "//source/server:listener_manager_lib",
+        "//envoy/api:api_interface",
+        "//envoy/grpc:status",
+        "//envoy/http:codec_interface",
+        "//envoy/network:connection_handler_interface",
+        "//envoy/network:connection_interface",
+        "//envoy/network:filter_interface",
+        "//envoy/stats:stats_interface",
+        "//source/common/buffer:buffer_lib",
+        "//source/common/buffer:zero_copy_input_stream_lib",
+        "//source/common/common:basic_resource_lib",
+        "//source/common/common:callback_impl_lib",
+        "//source/common/common:linked_object",
+        "//source/common/common:lock_guard_lib",
+        "//source/common/http/http3:codec_stats_lib",
+        "//source/common/common:thread_lib",
+        "//source/common/config:utility_lib",
+        "//source/common/grpc:codec_lib",
+        "//source/common/grpc:common_lib",
+        "//source/common/http/http1:codec_lib",
+        "//source/common/http/http2:codec_lib",
+        "//source/common/network:connection_balancer_lib",
+        "//source/common/network:filter_lib",
+        "//source/common/network:listen_socket_lib",
+        "//source/common/network:socket_option_factory_lib",
+        "//source/common/network:udp_packet_writer_handler_lib",
+        "//source/common/network:utility_lib",
+        "//source/common/stats:isolated_store_lib",
+        "//source/server:active_raw_udp_listener_config",
+        "//source/server:connection_handler_lib",
+        "//test/test_common:network_utility_lib",
+        "//test/test_common:test_time_system_interface",
+        "//test/test_common:utility_lib",
+        "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
+        "@envoy_api//envoy/config/listener/v3:pkg_cc_proto",
+    ] + envoy_select_enable_http3([
+        "//source/common/quic:active_quic_listener_lib",
+        "//source/common/quic:quic_factory_lib",
+        "@com_github_google_quiche//:quic_test_tools_session_peer_lib",
+    ]),
+)
+
+envoy_cc_test_library(
+    name = "base_integration_test_lib",
+    srcs = [
+        "base_integration_test.cc",
+    ],
+    hdrs = [
+        "base_integration_test.h",
+    ],
+    deps = [
+        ":autonomous_upstream_lib",
+        ":fake_upstream_lib",
+        ":integration_tcp_client_lib",
+        ":utility_lib",
+        "//source/common/common:thread_lib",
+        "//source/common/config:api_version_lib",
+        "//source/extensions/network/dns_resolver/cares:config",
+        "//source/extensions/transport_sockets/tls:context_config_lib",
+        "//source/extensions/transport_sockets/tls:context_lib",
+        "//source/extensions/transport_sockets/tls:ssl_socket_lib",
+        "//source/server:process_context_lib",
+        "//test/common/grpc:grpc_client_integration_lib",
+        "//test/config:utility_lib",
+        "//test/mocks/buffer:buffer_mocks",
+        "//test/mocks/server:transport_socket_factory_context_mocks",
+        "//test/test_common:environment_lib",
+        "//test/test_common:network_utility_lib",
+        "//test/test_common:simulated_time_system_lib",
+        "//test/test_common:test_time_lib",
+        "@envoy_api//envoy/admin/v3:pkg_cc_proto",
+        "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
+        "@envoy_api//envoy/config/endpoint/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/transport_sockets/quic/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/transport_sockets/tls/v3:pkg_cc_proto",
+        "@envoy_api//envoy/service/discovery/v3:pkg_cc_proto",
+    ] + select({
+        "//bazel:apple": ["//source/extensions/network/dns_resolver/apple:config"],
+        "//conditions:default": [],
+    }),
+)
+
+envoy_cc_test_library(
+    name = "autonomous_upstream_lib",
     srcs = [
         "autonomous_upstream.cc",
-        "fake_upstream.cc",
-        "integration.cc",
+    ],
+    hdrs = [
+        "autonomous_upstream.h",
+    ],
+    deps = [
+        ":fake_upstream_lib",
+    ],
+)
+
+envoy_cc_test_library(
+    name = "utility_lib",
+    srcs = [
         "server.cc",
         "ssl_utility.cc",
         "utility.cc",
     ],
     hdrs = [
-        "autonomous_upstream.h",
-        "fake_upstream.h",
-        "integration.h",
         "server.h",
         "ssl_utility.h",
         "utility.h",
@@ -523,26 +821,91 @@ envoy_cc_test_library(
     deps = [
         ":server_stats_interface",
         ":tcp_dump",
-        "//include/envoy/api:api_interface",
-        "//include/envoy/buffer:buffer_interface",
-        "//include/envoy/event:dispatcher_interface",
-        "//include/envoy/grpc:status",
-        "//include/envoy/http:codec_interface",
-        "//include/envoy/http:header_map_interface",
-        "//include/envoy/network:connection_interface",
-        "//include/envoy/network:filter_interface",
-        "//include/envoy/server:configuration_interface",
-        "//include/envoy/server:hot_restart_interface",
-        "//include/envoy/server:options_interface",
-        "//include/envoy/stats:stats_interface",
-        "//include/envoy/thread:thread_interface",
+        "//envoy/api:api_interface",
+        "//envoy/http:codec_interface",
+        "//envoy/http:header_map_interface",
+        "//envoy/network:filter_interface",
+        "//envoy/server:options_interface",
+        "//envoy/server:process_context_interface",
+        "//envoy/stats:stats_interface",
+        "//source/common/api:api_lib",
+        "//source/common/common:assert_lib",
+        "//source/common/common:lock_guard_lib",
+        "//source/common/common:logger_lib",
+        "//source/common/common:random_generator_lib",
+        "//source/common/common:thread_lib",
+        "//source/common/common:utility_lib",
+        "//source/common/http:codec_client_lib",
+        "//source/common/http/http3:quic_client_connection_factory_lib",
+        "//source/common/json:json_loader_lib",
+        "//source/common/network:utility_lib",
+        "//source/common/quic:quic_stat_names_lib",
+        "//source/common/stats:allocator_lib",
+        "//source/common/stats:isolated_store_lib",
+        "//source/common/thread_local:thread_local_lib",
+        "//source/extensions/transport_sockets/tls:config",
+        "//source/extensions/transport_sockets/tls:context_lib",
+        "//source/server:drain_manager_lib",
+        "//source/server:hot_restart_nop_lib",
+        "//source/server:listener_hooks_lib",
+        "//source/server:options_lib",
+        "//source/server:process_context_lib",
+        "//source/server:server_lib",
+        "//test/common/runtime:utility_lib",
+        "//test/common/upstream:utility_lib",
+        "//test/config:utility_lib",
+        "//test/mocks:common_lib",
+        "//test/mocks/event:event_mocks",
+        "//test/mocks/runtime:runtime_mocks",
+        "//test/mocks/server:transport_socket_factory_context_mocks",
+        "//test/mocks/upstream:cluster_info_mocks",
+        "//test/test_common:environment_lib",
+        "//test/test_common:network_utility_lib",
+        "//test/test_common:printers_lib",
+        "//test/test_common:simulated_time_system_lib",
+        "//test/test_common:test_time_lib",
+        "//test/test_common:test_time_system_interface",
+        "//test/test_common:utility_lib",
+        "@com_google_absl//absl/synchronization",
+        "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
+        "@envoy_api//envoy/config/listener/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/transport_sockets/quic/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/transport_sockets/tls/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_test_library(
+    name = "integration_lib",
+    hdrs = [
+        "integration.h",
+    ],
+    deps = [
+        ":autonomous_upstream_lib",
+        ":base_integration_test_lib",
+        ":fake_upstream_lib",
+        ":integration_stream_decoder_lib",
+        ":integration_tcp_client_lib",
+        ":utility_lib",
+        "//envoy/api:api_interface",
+        "//envoy/buffer:buffer_interface",
+        "//envoy/event:dispatcher_interface",
+        "//envoy/grpc:status",
+        "//envoy/http:codec_interface",
+        "//envoy/http:header_map_interface",
+        "//envoy/network:connection_interface",
+        "//envoy/network:filter_interface",
+        "//envoy/server:configuration_interface",
+        "//envoy/server:hot_restart_interface",
+        "//envoy/server:options_interface",
+        "//envoy/stats:stats_interface",
+        "//envoy/thread:thread_interface",
         "//source/common/api:api_lib",
         "//source/common/buffer:buffer_lib",
         "//source/common/buffer:zero_copy_input_stream_lib",
         "//source/common/common:assert_lib",
+        "//source/common/common:basic_resource_lib",
         "//source/common/common:minimal_logger_lib",
         "//source/common/config:api_version_lib",
-        "//source/common/config:version_converter_lib",
         "//source/common/event:dispatcher_lib",
         "//source/common/grpc:codec_lib",
         "//source/common/grpc:common_lib",
@@ -557,16 +920,15 @@ envoy_cc_test_library(
         "//source/common/network:utility_lib",
         "//source/common/runtime:runtime_lib",
         "//source/common/stats:isolated_store_lib",
-        "//source/common/stats:symbol_table_creator_lib",
         "//source/common/stats:thread_local_store_lib",
         "//source/common/thread_local:thread_local_lib",
         "//source/common/upstream:upstream_includes",
         "//source/common/upstream:upstream_lib",
         "//source/extensions/access_loggers/file:config",
+        "//source/extensions/access_loggers/stream:config",
         "//source/extensions/transport_sockets/raw_buffer:config",
-        "//source/extensions/transport_sockets/tap:config",
-        "//source/extensions/transport_sockets/tls:config",
         "//source/server:connection_handler_lib",
+        "//source/server:drain_manager_lib",
         "//source/server:hot_restart_nop_lib",
         "//source/server:listener_hooks_lib",
         "//source/server:process_context_lib",
@@ -576,9 +938,9 @@ envoy_cc_test_library(
         "//test/common/upstream:utility_lib",
         "//test/config:utility_lib",
         "//test/mocks/buffer:buffer_mocks",
-        "//test/mocks/server:server_mocks",
         "//test/mocks/stats:stats_mocks",
-        "//test/mocks/upstream:upstream_mocks",
+        "//test/mocks/upstream:retry_priority_factory_mocks",
+        "//test/mocks/upstream:retry_priority_mocks",
         "//test/test_common:environment_lib",
         "//test/test_common:network_utility_lib",
         "//test/test_common:printers_lib",
@@ -586,12 +948,6 @@ envoy_cc_test_library(
         "//test/test_common:test_time_lib",
         "//test/test_common:test_time_system_interface",
         "//test/test_common:utility_lib",
-        "@envoy_api//envoy/admin/v3:pkg_cc_proto",
-        "@envoy_api//envoy/api/v2:pkg_cc_proto",
-        "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
-        "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
-        "@envoy_api//envoy/config/endpoint/v3:pkg_cc_proto",
-        "@envoy_api//envoy/extensions/transport_sockets/tls/v3:pkg_cc_proto",
     ],
 )
 
@@ -602,18 +958,17 @@ envoy_cc_test(
         "integration_test.h",
     ],
     shard_count = 2,
-    # Times out on Windows
-    tags = ["fails_on_windows"],
     deps = [
         ":http_integration_lib",
         "//source/common/http:header_map_lib",
         "//source/common/http:headers_lib",
-        "//source/extensions/filters/http/cors:config",
-        "//source/extensions/filters/http/grpc_http1_bridge:config",
-        "//source/extensions/filters/http/health_check:config",
         "//test/integration/filters:clear_route_cache_filter_lib",
         "//test/integration/filters:encoder_decoder_buffer_filter_lib",
+        "//test/integration/filters:invalid_header_filter_lib",
         "//test/integration/filters:process_context_lib",
+        "//test/integration/filters:set_response_code_filter_config_proto_cc_proto",
+        "//test/integration/filters:set_response_code_filter_lib",
+        "//test/integration/filters:set_route_filter_lib",
         "//test/integration/filters:stop_iteration_and_continue",
         "//test/mocks/http:http_mocks",
         "//test/test_common:utility_lib",
@@ -628,7 +983,6 @@ envoy_cc_test(
     srcs = [
         "redirect_integration_test.cc",
     ],
-    tags = ["fails_on_windows"],
     deps = [
         ":http_protocol_integration_lib",
         "//source/common/http:header_map_lib",
@@ -644,8 +998,6 @@ envoy_cc_test(
         "websocket_integration_test.cc",
         "websocket_integration_test.h",
     ],
-    # Times out on Windows
-    tags = ["fails_on_windows"],
     deps = [
         ":http_protocol_integration_lib",
         "//source/common/http:header_map_lib",
@@ -658,24 +1010,12 @@ envoy_cc_test(
 )
 
 envoy_cc_test(
-    name = "echo_integration_test",
-    srcs = [
-        "echo_integration_test.cc",
-    ],
-    tags = [
-        # Uncomment this line to run this test repeatedly in exclusive mode if not using docker-sandbox,
-        # or RBE, see comments in AddRemoveListener.
-        # "exclusive",
-        # TODO(wrowe,sunjayBhatia): Skipping this on Windows as MSVC does not allow invoking
-        # connection.close() from within the lambda that is passed to the RawConnectionDriver
-        # constructor
-        "skip_on_windows",
-    ],
+    name = "socket_interface_integration_test",
+    srcs = ["socket_interface_integration_test.cc"],
     deps = [
-        ":integration_lib",
+        ":http_integration_lib",
+        "//source/common/network:socket_interface_lib",
         "//source/extensions/filters/network/echo:config",
-        "//test/server:utility_lib",
-        "//test/test_common:utility_lib",
     ],
 )
 
@@ -685,11 +1025,9 @@ envoy_cc_test(
     # The symbol table cluster memory tests take a while to run specially under tsan.
     # Shard it to avoid test timeout.
     shard_count = 2,
-    tags = ["fails_on_windows"],
     deps = [
         ":integration_lib",
         "//source/common/memory:stats_lib",
-        "//source/common/stats:symbol_table_creator_lib",
         "//source/extensions/filters/http/router:config",
         "//source/extensions/filters/network/http_connection_manager:config",
         "//test/common/stats:stat_test_utility_lib",
@@ -703,7 +1041,6 @@ envoy_cc_test(
 envoy_cc_test(
     name = "load_stats_integration_test",
     srcs = ["load_stats_integration_test.cc"],
-    tags = ["fails_on_windows"],
     deps = [
         ":http_integration_lib",
         "//test/config:utility_lib",
@@ -721,11 +1058,14 @@ envoy_cc_test(
 envoy_cc_test(
     name = "hds_integration_test",
     srcs = ["hds_integration_test.cc"],
-    tags = ["fails_on_windows"],
+    data = [
+        "//test/config/integration/certs",
+    ],
+    shard_count = 2,
     deps = [
         ":http_integration_lib",
         ":integration_lib",
-        "//include/envoy/upstream:upstream_interface",
+        "//envoy/upstream:upstream_interface",
         "//source/common/config:metadata_lib",
         "//source/common/json:json_loader_lib",
         "//source/common/network:utility_lib",
@@ -738,6 +1078,7 @@ envoy_cc_test(
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
         "@envoy_api//envoy/service/health/v3:pkg_cc_proto",
+        "@envoy_api//envoy/type/v3:pkg_cc_proto",
     ],
 )
 
@@ -745,58 +1086,93 @@ envoy_cc_test(
     name = "header_prefix_integration_test",
     srcs = ["header_prefix_integration_test.cc"],
     coverage = False,
-    tags = ["fails_on_windows"],
     deps = [
         ":http_protocol_integration_lib",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
     ],
 )
 
-envoy_cc_test(
-    name = "overload_integration_test",
-    srcs = ["overload_integration_test.cc"],
-    tags = ["fails_on_windows"],
+envoy_cc_test_library(
+    name = "fake_resource_monitor_lib",
+    srcs = [
+        "fake_resource_monitor.cc",
+    ],
+    hdrs = [
+        "fake_resource_monitor.h",
+    ],
     deps = [
-        ":http_protocol_integration_lib",
-        "//source/extensions/resource_monitors/injected_resource:config",
+        "//envoy/server:resource_monitor_config_interface",
+        "//test/common/config:dummy_config_proto_cc_proto",
+    ],
+)
+
+envoy_cc_test_library(
+    name = "base_overload_integration_test_lib",
+    srcs = [
+        "base_overload_integration_test.cc",
+    ],
+    hdrs = [
+        "base_overload_integration_test.h",
+    ],
+    deps = [
+        ":fake_resource_monitor_lib",
+        "//test/test_common:registry_lib",
+        "//test/test_common:utility_lib",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/overload/v3:pkg_cc_proto",
     ],
 )
 
 envoy_cc_test(
-    name = "proxy_proto_integration_test",
-    srcs = [
-        "proxy_proto_integration_test.cc",
-        "proxy_proto_integration_test.h",
-    ],
-    tags = ["fails_on_windows"],
+    name = "overload_integration_test",
+    srcs = ["overload_integration_test.cc"],
+    shard_count = 2,
     deps = [
-        ":http_integration_lib",
-        "//source/common/buffer:buffer_lib",
-        "//source/common/http:codec_client_lib",
-        "//source/extensions/filters/listener/proxy_protocol:config",
-        "//test/test_common:utility_lib",
+        ":base_overload_integration_test_lib",
+        ":http_protocol_integration_lib",
+        "//test/common/config:dummy_config_proto_cc_proto",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
-        "@envoy_api//envoy/config/cluster/v3:pkg_cc_proto",
+        "@envoy_api//envoy/config/overload/v3:pkg_cc_proto",
     ],
 )
 
 envoy_cc_test(
     name = "rtds_integration_test",
     srcs = ["rtds_integration_test.cc"],
-    tags = ["fails_on_windows"],
     deps = [
         ":http_integration_lib",
         "//test/common/grpc:grpc_client_integration_lib",
+        "//test/config:v2_link_hacks",
         "@envoy_api//envoy/service/runtime/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_test(
+    name = "extension_discovery_integration_test",
+    srcs = ["extension_discovery_integration_test.cc"],
+    deps = [
+        ":http_integration_lib",
+        "//test/common/grpc:grpc_client_integration_lib",
+        "//test/config:v2_link_hacks",
+        "//test/integration/filters:set_is_terminal_filter_config_proto_cc_proto",
+        "//test/integration/filters:set_is_terminal_filter_lib",
+        "//test/integration/filters:set_response_code_filter_config_proto_cc_proto",
+        "//test/integration/filters:set_response_code_filter_lib",
+        "//test/test_common:utility_lib",
+        "@envoy_api//envoy/extensions/common/matching/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg_cc_proto",
+        "@envoy_api//envoy/service/discovery/v3:pkg_cc_proto",
+        "@envoy_api//envoy/service/extension/v3:pkg_cc_proto",
     ],
 )
 
 envoy_cc_test_library(
     name = "server_stats_interface",
     hdrs = ["server_stats.h"],
-    deps = ["//include/envoy/stats:stats_interface"],
+    deps = [
+        "//envoy/event:dispatcher_interface",
+        "//envoy/stats:stats_interface",
+    ],
 )
 
 envoy_cc_test(
@@ -807,7 +1183,6 @@ envoy_cc_test(
     data = [
         "//test/config/integration/certs",
     ],
-    tags = ["fails_on_windows"],
     deps = [
         ":http_integration_lib",
         "//source/common/event:dispatcher_includes",
@@ -830,9 +1205,16 @@ envoy_cc_test(
         "sds_dynamic_integration_test.cc",
     ],
     data = [
+        "sds_dynamic_key_rotation_setup.sh",
         "//test/config/integration/certs",
     ],
-    tags = ["fails_on_windows"],
+    # TODO(envoyproxy/windows-dev): The key rotation in SdsDynamicKeyRotationIntegrationTest via
+    # TestEnvironment::renameFile() fails on Windows. The renameFile() implementation does not
+    # correctly handle symlinks.
+    tags = [
+        "fails_on_clang_cl",
+        "fails_on_windows",
+    ],
     deps = [
         ":http_integration_lib",
         "//source/common/config:api_version_lib",
@@ -845,14 +1227,16 @@ envoy_cc_test(
         "//source/extensions/transport_sockets/tls:context_config_lib",
         "//source/extensions/transport_sockets/tls:context_lib",
         "//test/common/grpc:grpc_client_integration_lib",
+        "//test/extensions/transport_sockets/tls:test_private_key_method_provider_test_lib",
         "//test/mocks/runtime:runtime_mocks",
         "//test/mocks/secret:secret_mocks",
         "//test/test_common:resources_lib",
         "//test/test_common:utility_lib",
-        "@envoy_api//envoy/api/v2:pkg_cc_proto",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/transport_sockets/quic/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/transport_sockets/tls/v3:pkg_cc_proto",
+        "@envoy_api//envoy/service/discovery/v3:pkg_cc_proto",
         "@envoy_api//envoy/service/secret/v3:pkg_cc_proto",
     ],
 )
@@ -862,17 +1246,22 @@ envoy_cc_test(
     srcs = [
         "sds_generic_secret_integration_test.cc",
     ],
-    tags = ["fails_on_windows"],
     deps = [
         ":http_integration_lib",
-        "//include/envoy/registry",
+        "//envoy/registry",
         "//source/common/grpc:common_lib",
+        "//test/config:v2_link_hacks",
         "//test/test_common:registry_lib",
         "//test/test_common:utility_lib",
-        "@envoy_api//envoy/api/v2:pkg_cc_proto",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
+        "@envoy_api//envoy/service/discovery/v3:pkg_cc_proto",
     ],
+)
+
+envoy_proto_library(
+    name = "tcp_proxy_integration_proto",
+    srcs = [":tcp_proxy_integration_test.proto"],
 )
 
 envoy_cc_test(
@@ -884,20 +1273,23 @@ envoy_cc_test(
     data = [
         "//test/config/integration/certs",
     ],
-    tags = ["fails_on_windows"],
+    shard_count = 2,
     deps = [
         ":integration_lib",
+        ":tcp_proxy_integration_proto_cc_proto",
         "//source/common/config:api_version_lib",
         "//source/common/event:dispatcher_includes",
         "//source/common/event:dispatcher_lib",
         "//source/common/network:utility_lib",
         "//source/extensions/access_loggers/file:config",
+        "//source/extensions/filters/network/common:factory_base_lib",
         "//source/extensions/filters/network/tcp_proxy:config",
         "//source/extensions/transport_sockets/tls:config",
         "//source/extensions/transport_sockets/tls:context_config_lib",
         "//source/extensions/transport_sockets/tls:context_lib",
         "//test/mocks/runtime:runtime_mocks",
         "//test/mocks/secret:secret_mocks",
+        "//test/test_common:registry_lib",
         "//test/test_common:utility_lib",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/cluster/v3:pkg_cc_proto",
@@ -910,19 +1302,20 @@ envoy_cc_test(
 
 envoy_cc_test(
     name = "tcp_tunneling_integration_test",
+    size = "large",
     srcs = [
         "tcp_tunneling_integration_test.cc",
     ],
     data = [
         "//test/config/integration/certs",
     ],
-    tags = ["fails_on_windows"],
+    shard_count = 3,
     deps = [
         ":http_integration_lib",
         ":http_protocol_integration_lib",
         "//source/extensions/filters/network/tcp_proxy:config",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
-        "@envoy_api//envoy/config/filter/network/tcp_proxy/v2:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/filters/network/tcp_proxy/v3:pkg_cc_proto",
     ],
 )
 
@@ -931,11 +1324,10 @@ envoy_cc_test(
     srcs = [
         "tcp_conn_pool_integration_test.cc",
     ],
-    tags = ["fails_on_windows"],
     deps = [
         ":integration_lib",
-        "//include/envoy/server:filter_config_interface",
-        "//include/envoy/tcp:conn_pool_interface",
+        "//envoy/server:filter_config_interface",
+        "//envoy/tcp:conn_pool_interface",
         "//test/server:utility_lib",
         "//test/test_common:registry_lib",
         "//test/test_common:utility_lib",
@@ -952,13 +1344,37 @@ envoy_cc_test_library(
     ],
 )
 
+envoy_cc_test_library(
+    name = "tracked_watermark_buffer_lib",
+    srcs = [
+        "tracked_watermark_buffer.cc",
+    ],
+    hdrs = [
+        "tracked_watermark_buffer.h",
+    ],
+    deps = [
+        "//source/common/buffer:watermark_buffer_lib",
+        "//test/test_common:utility_lib",
+        "@envoy_api//envoy/config/overload/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_test(
+    name = "tracked_watermark_buffer_test",
+    srcs = ["tracked_watermark_buffer_test.cc"],
+    deps = [
+        ":tracked_watermark_buffer_lib",
+        "//test/mocks/http:stream_reset_handler_mock",
+        "//test/test_common:test_runtime_lib",
+    ],
+)
+
 envoy_cc_test(
     name = "uds_integration_test",
     srcs = [
         "uds_integration_test.cc",
         "uds_integration_test.h",
     ],
-    tags = ["fails_on_windows"],
     deps = [
         ":http_integration_lib",
         "//source/common/event:dispatcher_includes",
@@ -973,7 +1389,6 @@ envoy_cc_test(
 envoy_cc_test(
     name = "version_integration_test",
     srcs = ["version_integration_test.cc"],
-    tags = ["fails_on_windows"],
     deps = [
         ":http_integration_lib",
         "//source/extensions/filters/http/ip_tagging:config",
@@ -984,7 +1399,6 @@ envoy_cc_test(
     name = "dynamic_validation_integration_test",
     srcs = ["dynamic_validation_integration_test.cc"],
     data = ["//test/config/integration:server_xds_files"],
-    tags = ["fails_on_windows"],
     deps = [
         ":http_integration_lib",
         "//source/common/stats:stats_lib",
@@ -1000,7 +1414,6 @@ envoy_cc_test(
         "//test/config/integration:server_xds_files",
         "//test/config/integration/certs",
     ],
-    tags = ["fails_on_windows"],
     deps = [
         ":http_integration_lib",
         ":http_protocol_integration_lib",
@@ -1026,12 +1439,11 @@ envoy_cc_test(
     data = [
         "//test/config/integration/certs",
     ],
-    tags = ["fails_on_windows"],
     deps = [
         ":http_integration_lib",
         "//source/common/http:header_map_lib",
         "//source/extensions/transport_sockets/tls:config",
-        "//test/mocks/server:server_mocks",
+        "//test/mocks/server:transport_socket_factory_context_mocks",
         "//test/test_common:utility_lib",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg_cc_proto",
@@ -1100,12 +1512,81 @@ envoy_cc_fuzz_test(
     ],
 )
 
+H2_FUZZ_LIB_DEPS = [
+    ":h2_capture_fuzz_proto_cc_proto",
+    ":http_integration_lib",
+    "//source/common/common:assert_lib",
+    "//source/common/common:logger_lib",
+    "//test/common/http/http2:http2_frame",
+    "//test/fuzz:fuzz_runner_lib",
+    "//test/fuzz:utility_lib",
+    "//test/integration:integration_lib",
+    "//test/test_common:environment_lib",
+]
+
+envoy_cc_test_library(
+    name = "h2_fuzz_lib",
+    srcs = ["h2_fuzz.cc"],
+    hdrs = ["h2_fuzz.h"],
+    deps = H2_FUZZ_LIB_DEPS,
+)
+
+envoy_cc_test_library(
+    name = "h2_fuzz_persistent_lib",
+    srcs = ["h2_fuzz.cc"],
+    hdrs = ["h2_fuzz.h"],
+    copts = ["-DPERSISTENT_FUZZER"],
+    deps = H2_FUZZ_LIB_DEPS,
+)
+
+envoy_cc_fuzz_test(
+    name = "h2_capture_fuzz_test",
+    srcs = ["h2_capture_fuzz_test.cc"],
+    corpus = "h2_corpus",
+    deps = [":h2_fuzz_lib"],
+)
+
+envoy_cc_fuzz_test(
+    name = "h2_wrapped_capture_fuzz_test",
+    srcs = ["h2_wrapped_capture_fuzz_test.cc"],
+    corpus = "h2_corpus",
+    deps = [":h2_fuzz_lib"],
+)
+
+envoy_cc_fuzz_test(
+    name = "h2_capture_persistent_fuzz_test",
+    srcs = ["h2_capture_fuzz_test.cc"],
+    copts = ["-DPERSISTENT_FUZZER"],
+    corpus = "h2_corpus",
+    deps = [":h2_fuzz_persistent_lib"],
+)
+
+envoy_cc_fuzz_test(
+    name = "h2_capture_direct_response_fuzz_test",
+    srcs = ["h2_capture_direct_response_fuzz_test.cc"],
+    corpus = "h2_corpus",
+    deps = [
+        ":h2_fuzz_lib",
+        "@envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_fuzz_test(
+    name = "h2_capture_direct_response_persistent_fuzz_test",
+    srcs = ["h2_capture_direct_response_fuzz_test.cc"],
+    copts = ["-DPERSISTENT_FUZZER"],
+    corpus = "h2_corpus",
+    deps = [
+        ":h2_fuzz_persistent_lib",
+        "@envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg_cc_proto",
+    ],
+)
+
 envoy_cc_test(
     name = "scoped_rds_integration_test",
     srcs = [
         "scoped_rds_integration_test.cc",
     ],
-    tags = ["fails_on_windows"],
     deps = [
         ":http_integration_lib",
         "//source/common/config:api_version_lib",
@@ -1114,13 +1595,14 @@ envoy_cc_test(
         "//source/common/network:connection_lib",
         "//source/common/network:utility_lib",
         "//test/common/grpc:grpc_client_integration_lib",
+        "//test/config:v2_link_hacks",
         "//test/test_common:resources_lib",
         "//test/test_common:utility_lib",
-        "@envoy_api//envoy/api/v2:pkg_cc_proto",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/route/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg_cc_proto",
+        "@envoy_api//envoy/service/discovery/v3:pkg_cc_proto",
     ],
 )
 
@@ -1129,7 +1611,6 @@ envoy_cc_test(
     srcs = [
         "listener_lds_integration_test.cc",
     ],
-    tags = ["fails_on_windows"],
     deps = [
         ":http_integration_lib",
         "//source/common/config:api_version_lib",
@@ -1137,14 +1618,47 @@ envoy_cc_test(
         "//source/common/event:dispatcher_lib",
         "//source/common/network:connection_lib",
         "//source/common/network:utility_lib",
+        "//source/extensions/filters/network/tcp_proxy:config",
         "//test/common/grpc:grpc_client_integration_lib",
+        "//test/config:v2_link_hacks",
+        "//test/integration/filters:address_restore_listener_filter_lib",
+        "//test/integration/filters:set_response_code_filter_config_proto_cc_proto",
+        "//test/integration/filters:set_response_code_filter_lib",
+        "//test/test_common:network_utility_lib",
         "//test/test_common:resources_lib",
         "//test/test_common:utility_lib",
-        "@envoy_api//envoy/api/v2:pkg_cc_proto",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/route/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/filters/network/tcp_proxy/v3:pkg_cc_proto",
+        "@envoy_api//envoy/service/discovery/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_test(
+    name = "internal_listener_integration_test",
+    srcs = [
+        "internal_listener_integration_test.cc",
+    ],
+    deps = [
+        ":http_integration_lib",
+        "//source/common/config:api_version_lib",
+        "//source/common/event:dispatcher_includes",
+        "//source/common/event:dispatcher_lib",
+        "//source/common/network:connection_lib",
+        "//source/common/network:utility_lib",
+        "//source/extensions/filters/network/tcp_proxy:config",
+        "//test/common/grpc:grpc_client_integration_lib",
+        "//test/config:v2_link_hacks",
+        "//test/integration/filters:address_restore_listener_filter_lib",
+        "//test/test_common:network_utility_lib",
+        "//test/test_common:resources_lib",
+        "//test/test_common:utility_lib",
+        "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
+        "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/filters/network/tcp_proxy/v3:pkg_cc_proto",
+        "@envoy_api//envoy/service/discovery/v3:pkg_cc_proto",
     ],
 )
 
@@ -1156,7 +1670,6 @@ envoy_cc_test(
     data = [
         "//test/config/integration/certs",
     ],
-    tags = ["fails_on_windows"],
     deps = [
         ":integration_lib",
         "//source/common/config:api_version_lib",
@@ -1177,5 +1690,187 @@ envoy_cc_test(
         "@envoy_api//envoy/config/cluster/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/access_loggers/file/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_test(
+    name = "cx_limit_integration_test",
+    srcs = ["cx_limit_integration_test.cc"],
+    deps = [
+        ":http_integration_lib",
+        "//envoy/network:filter_interface",
+        "//envoy/registry",
+        "//source/extensions/filters/network/tcp_proxy:config",
+        "//test/config:utility_lib",
+        "//test/test_common:logging_lib",
+        "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_test(
+    name = "direct_response_integration_test",
+    srcs = ["direct_response_integration_test.cc"],
+    deps = [
+        ":http_integration_lib",
+    ],
+)
+
+envoy_cc_test(
+    name = "local_reply_integration_test",
+    srcs = [
+        "local_reply_integration_test.cc",
+    ],
+    deps = [
+        ":http_integration_lib",
+        ":http_protocol_integration_lib",
+        "//test/test_common:utility_lib",
+    ],
+)
+
+envoy_cc_test(
+    name = "command_formatter_extension_integration_test",
+    srcs = [
+        "command_formatter_extension_integration_test.cc",
+    ],
+    deps = [
+        ":http_integration_lib",
+        "//test/common/formatter:command_extension_lib",
+        "//test/test_common:utility_lib",
+    ],
+)
+
+envoy_cc_test(
+    name = "health_check_integration_test",
+    srcs = ["health_check_integration_test.cc"],
+    deps = [
+        ":http_integration_lib",
+        ":integration_lib",
+        "//test/common/http/http2:http2_frame",
+        "//test/config:v2_link_hacks",
+        "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
+        "@envoy_api//envoy/type/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_test(
+    name = "cluster_upstream_extension_integration_test",
+    srcs = [
+        "cluster_upstream_extension_integration_test.cc",
+    ],
+    deps = [
+        ":http_integration_lib",
+        "//source/common/config:api_version_lib",
+        "//source/common/protobuf",
+        "//test/integration/upstreams:per_host_upstream_config",
+        "//test/test_common:utility_lib",
+        "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg_cc_proto",
+    ],
+)
+
+# TODO(mattklein123): Use target_compatible_with when we switch to Bazel 4.0 instead of multiple
+# selects.
+envoy_cc_test(
+    name = "quic_protocol_integration_test",
+    size = "large",
+    srcs = envoy_select_enable_http3([
+        "quic_protocol_integration_test.cc",
+    ]),
+    args = [
+        # for coverage, until this defaults true.
+        "--runtime-feature-override-for-tests=envoy.reloadable_features.allow_upstream_inline_write",
+    ],
+    data = ["//test/config/integration/certs"],
+    shard_count = 8,
+    tags = [
+        "nofips",
+    ],
+    deps = envoy_select_enable_http3([
+        ":protocol_integration_test_lib",
+        "//source/common/quic:active_quic_listener_lib",
+        "//source/common/quic:client_connection_factory_lib",
+        "//source/common/quic:quic_factory_lib",
+        "//source/common/quic:quic_transport_socket_factory_lib",
+        "//test/integration/filters:pause_filter_for_quic_lib",
+    ]),
+)
+
+# TODO(mattklein123): Use target_compatible_with when we switch to Bazel 4.0 instead of multiple
+# selects.
+envoy_cc_test(
+    name = "quic_http_integration_test",
+    size = "large",
+    srcs = envoy_select_enable_http3(["quic_http_integration_test.cc"]),
+    data = ["//test/config/integration/certs"],
+    shard_count = 6,
+    # TODO(envoyproxy/windows-dev): Diagnose failure shown only on clang-cl build, see:
+    #   https://gist.github.com/wrowe/a152cb1d12c2f751916122aed39d8517
+    # TODO(envoyproxy/windows-dev): Diagnose timeout, why opt build test under Windows GCP RBE
+    # takes 10x as long as on linux (>300s vs ~30s). Shards = 2 solves for windows, see:
+    #   https://github.com/envoyproxy/envoy/pull/13713/files#r512160087
+    # Each of these tests exceeds 20s;
+    # QuicHttpIntegrationTests/QuicHttpIntegrationTest.MultipleQuicConnections[With|No]BPF*
+    tags = [
+        "fails_on_clang_cl",
+        "fails_on_windows",
+        "nofips",
+    ],
+    deps = envoy_select_enable_http3([
+        ":http_integration_lib",
+        "//source/common/quic:client_connection_factory_lib",
+        "//source/common/quic:envoy_quic_client_connection_lib",
+        "//source/common/quic:envoy_quic_client_session_lib",
+        "//source/common/quic:envoy_quic_connection_helper_lib",
+        "//source/common/quic:envoy_quic_proof_verifier_lib",
+        "//source/common/quic:quic_factory_lib",
+        "//test/common/quic:quic_test_utils_for_envoy_lib",
+        "//test/common/quic:test_utils_lib",
+        "//test/integration/filters:encoder_decoder_buffer_filter_lib",
+        "//test/test_common:test_runtime_lib",
+        "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
+        "@envoy_api//envoy/config/overload/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/transport_sockets/quic/v3:pkg_cc_proto",
+        "@com_github_google_quiche//:quic_test_tools_session_peer_lib",
+    ]),
+)
+
+envoy_cc_test(
+    name = "original_ip_detection_integration_test",
+    srcs = [
+        "original_ip_detection_integration_test.cc",
+    ],
+    deps = [
+        ":http_integration_lib",
+        "//source/extensions/http/original_ip_detection/custom_header:config",
+        "//test/test_common:utility_lib",
+        "@envoy_api//envoy/extensions/http/original_ip_detection/custom_header/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_test(
+    name = "weighted_cluster_integration_test",
+    srcs = ["weighted_cluster_integration_test.cc"],
+    deps = [
+        ":http_integration_lib",
+        ":integration_lib",
+        "//test/integration/filters:repick_cluster_filter_lib",
+        "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
+        "@envoy_api//envoy/config/route/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_test(
+    name = "typed_metadata_integration_test",
+    srcs = [
+        "typed_metadata_integration_test.cc",
+    ],
+    deps = [
+        ":http_protocol_integration_lib",
+        "//source/common/protobuf",
+        "//test/integration/filters:listener_typed_metadata_filter_lib",
+        "//test/server:utility_lib",
+        "//test/test_common:utility_lib",
     ],
 )

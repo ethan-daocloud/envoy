@@ -5,7 +5,7 @@
 namespace Envoy {
 double RouteCoverage::report() {
   uint64_t route_weight = 0;
-  for (const auto& covered_field : coverageFields()) {
+  for (auto covered_field : coverageFields()) {
     if (covered_field) {
       route_weight += 1;
     }
@@ -129,6 +129,6 @@ RouteCoverage& Coverage::coveredRoute(const Envoy::Router::Route& route) {
     covered_routes_.push_back(std::move(new_coverage));
     return coveredRoute(route);
   }
-  NOT_REACHED_GCOVR_EXCL_LINE;
+  PANIC("reached unexpected code");
 };
 } // namespace Envoy
